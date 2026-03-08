@@ -1,5 +1,6 @@
 import numpy as np
 import weakref
+import graph_util 
 #定义一个变量类
 class Variable:
     __array_priority__ = 999
@@ -505,3 +506,17 @@ if __name__ == '__main__':
     print(f"输入: x = {x2.value}, y = {y2.value} 结果: z = {z2.value}")
     z2.backward()
     print(f"\n梯度: ∂z/∂x =  {x2.grad.value} ∂z/∂y = {y2.grad.value}")
+
+        # 之前的复杂函数
+    def goldstein(x, y):
+        z = (1 + (x + y + 1) ** 2 * (19 - 14 * x + 3 * x ** 2 - 14 * y + 6 * x * y + 3 * y ** 2)) * \
+            (30 + (2 * x - 3 * y) ** 2 * (18 - 32 * x + 12 * x ** 2 + 48 * y - 36 * x * y + 27 * y ** 2))
+        return z
+
+    x = Variable(np.array(1.0), "x")
+    y = Variable(np.array(1.0), "y")
+    z = goldstein(x, y)
+    z.name = 'z'  # 给变量命名
+    z.backward()
+
+    graph_util.plot_dot_graph(z, verbose=True, to_file='goldstein.png')
