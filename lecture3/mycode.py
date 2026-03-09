@@ -1,6 +1,6 @@
 import numpy as np
 import weakref
-import graph_util 
+import lecture4.graph_util as graph_util 
 #定义一个变量类
 class Variable:
     __array_priority__ = 999

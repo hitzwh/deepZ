@@ -53,7 +53,7 @@ class Variable:
                 else:
                     x.grad = x.grad + gradList[i]  # 梯度累加
             #中间变量不需要就置空
-            if not retain_grad:
+            if (not retain_grad):
                 for y in f.output_variable:
                     y().grad = None
     #Variable的层数
@@ -95,6 +95,14 @@ class Variable:
         p = str(self.value).replace('\n','\n' + ' ' * 9) #打印对齐
         return "variable(" + p + ")"
     
+    #Variable内部方法，对齐ndarray用法
+    def reshape(self,*shape):
+        #支持输入一个（3，2）元组，也支持分别输入维度参数
+        if len(shape) == 1 and isinstance(shape[0],(tuple,list)):
+            shape = shape[0]
+        return reshape(self,shape) #调用全局的reshape函数
+
+
     #运算符重载
 
     def __add__(self,other):
@@ -169,7 +177,7 @@ class Function:
         #返回多元素列表或者单元素
         return output_variable_list if len(output_variable_list) > 1 else output_variable_list[0]
     
-    #正向计算，输入和输出都是Variable类型
+    #正向计算，输入和输出都是ndarray类型
     def forward(self,*input_x):
         raise NotImplementedError() #尚未实现forward方法，抛出异常
     
@@ -197,7 +205,7 @@ class Exp(Function):
     #求指数函数
     def forward(self,input_x):
         return np.exp(input_x)
-    #反向传播函数，输入和输出都是ndarray类型
+    #反向传播函数，输入和输出都是Variable类型
     def backward(self,input_dy):
         (out_dy,) = self.output_variable
         return input_dy * out_dy().value
@@ -212,7 +220,7 @@ class Sin(Function):
     #求正弦函数
     def forward(self,input_x):
         return np.sin(input_x)
-    #反向传播函数，输入和输出都是
+    #反向传播函数，输入和输出都是Variable类型
     def backward(self,input_dy):
         (x,) = self.input_variable
         return np.cos(x.value) * input_dy
@@ -225,7 +233,7 @@ class Cos(Function):
     #求余弦函数
     def forward(self,input_x):
         return np.cos(input_x)
-    #反向传播函数，输入和输出都是非Variable类型
+    #反向传播函数，输入和输出都是Variable类型
     def backward(self,input_dy):
         (x,) = self.input_variable
         return -np.sin(x.value) * input_dy
@@ -238,7 +246,7 @@ class Abs(Function):
     #求绝对值函数
     def forward(self,input_x):
         return np.abs(input_x)
-    #反向传播函数，输入和输出都是非Variable类型
+    #反向传播函数，输入和输出都是Variable类型
     def backward(self,input_dy):
         (input_x,) = self.input_variable
         return np.sign(input_x.value) * input_dy
@@ -252,7 +260,7 @@ class Neg(Function):
     #求负函数
     def forward(self,input_x):
         return -input_x
-    #反向传播函数，输入和输出都是非Variable类型
+    #反向传播函数，输入和输出都是Variable类型
     def backward(self,input_dy):
         return -1 * input_dy
 #优化的取负值函数
@@ -343,6 +351,38 @@ def numerical_differentiation(func,input_val,eps=1e-4):
     y1 = func(x1)
     return (y1.value - y0.value) / (2 * eps)
 
+#变换形状子类
+class Reshape(Function):
+    def __init__(self,target_shape):
+        self.origin_shape = None #先声明
+        self.target_shape = target_shape
+
+    def forward(self,x:np.array):
+        self.origin_shape = x.shape #记录原始形状，反向传播时可以使用
+        return np.reshape(x,self.target_shape)
+    
+    def backward(self,dy:Variable):
+        #return as_variable(np.reshape(dy.value,self.origin_shape))  #方法一
+        return reshape(dy,self.origin_shape)                         #方法二
+#简化的变换形状函数
+def reshape(input_x:Variable,shape):
+    if input_x.shape == shape:
+        return as_variable(input_x)
+    return Reshape(shape)(as_array(input_x))
+
+#转置子类
+class Transpose(Function):
+    def forward(self,input_x):
+        return np.transpose(input_x)
+    
+    def backward(self,dy): 
+        print(type(dy))
+        return np.transpose(dy)
+
+#简化后的转置方法    
+def transpose(input_x:Variable):
+    return Transpose()(as_array(input_x))
+
 # 通用测试函数：减少重复代码，统一测试逻辑
 def test_function(func, input_value, func_name, dy=1.0):
     """
@@ -376,149 +416,18 @@ def test_function(func, input_value, func_name, dy=1.0):
     print(f"   误差是否小于1e-5：{'是' if error < 1e-5 else '否'}")
     print()
 
+def temp_fun(x, y):
+    return pow(x + 1, 2) * neg(y) - abs(x - y)
 
 if __name__ == '__main__':
-    # 运算符重载测试
-    print("\n" + "=" * 60)
-    print("\n运算符重载测试")
-    print("-" * 40)
+    x = as_variable(np.array([[1, 2, 3], [4, 5, 6]]))
+    y = transpose(x)
+    z = transpose(x)
 
-    # 测试加法运算符
-    print("\n1. 加法运算符测试")
-    x = as_variable(as_array(2))
-    y = as_variable(as_array(3))
-    z = x + y
-    print(f"x + y = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}, ∂z/∂y = {y.grad.value}")
-
-    # 测试反向加法运算符
-    x = as_variable(as_array(2))
-    z = 3.0 + x
-    print(f"3.0 + x = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 测试乘法运算符
-    print("\n2. 乘法运算符测试")
-    x = as_variable(as_array(2))
-    y = as_variable(as_array(3))
-    z = x * y
-    print(f"x * y = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}, ∂z/∂y = {y.grad.value}")
-
-    # 测试反向乘法运算符
-    x = as_variable(as_array(2))
-    z = 3.0 * x
-    print(f"3.0 * x = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 测试减法运算符
-    print("\n3. 减法运算符测试")
-    x = as_variable(as_array(5))
-    y = as_variable(as_array(3))
-    z = x - y
-    print(f"x - y = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}, ∂z/∂y = {y.grad.value}")
-
-    # 测试反向减法运算符
-    x = as_variable(as_array(3))
-    z = 5.0 - x
-    print(f"5.0 - x = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 测试除法运算符
-    print("\n4. 除法运算符测试")
-    x = as_variable(as_array(6))
-    y = as_variable(as_array(3))
-    z = x / y
-    print(f"x / y = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}, ∂z/∂y = {y.grad.value}")
-
-    # 测试反向除法运算符
-    x = as_variable(as_array(2))
-    z = 6.0 / x
-    print(f"6.0 / x = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 测试幂运算符
-    print("\n5. 幂运算符测试")
-    x = as_variable(np.array([[2,2],[2,2]]))
-    z = x ** Variable(np.array([[1,2],[3,4]]))
-    print(f"x ** z = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 注意，不实现反向幂运算
-
-    # 测试取负运算符
-    print("\n6. 取负运算符测试")
-    x = as_variable(as_array(5))
-    z = -x
-    print(f"-x = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 测试绝对值运算符
-    print("\n7. 绝对值运算符测试")
-    x = as_variable(as_array(-5))
-    z = abs(x)
-    print(f"abs(x) = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    # 测试组合运算符
-    print("\n8. 组合运算符测试")
-    x = as_variable(as_array(2))
-    y = as_variable(as_array(3))
-    z = (x + y) * (x - y)
-    print(f"(x + y) * (x - y) = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}, ∂z/∂y = {y.grad.value}")
-
-    # 测试平方函数
-    print("\n9. 平方函数测试")
-    x = as_variable(as_array(5))
-    z = square(x)
-    print(f"x² = {z.value}")
-    z.backward()
-    print(f"梯度: ∂z/∂x = {x.grad.value}")
-
-    print("\n" + "=" * 60)
-    print("计算两个函数在 x=1, y=2 处的梯度")
-    print("\n函数1: z = x² + y²")
-    x1 = as_variable(as_array(1))
-    y1 = as_variable(as_array(2))
-    z1 = add(square(x1), square(y1))
-    print(f"输入: x = {x1.value}, y = {y1.value} 结果: z = {z1.value}")
-    z1.backward()
-    print(f"梯度: ∂z/∂x = {x1.grad.value} ∂z/∂y = {y1.grad.value}\n")
-    print("-" * 40)
-    print("函数2: z = 0.26(x² + y²) - 0.48xy")
-    x2 = as_variable(as_array(1))
-    y2 = as_variable(as_array(2))
-    z2 = sub(mul(Variable(as_array(0.26)), add(square(x2), square(y2))),
-             mul(Variable(as_array(0.48)), mul(x2, y2)))
-    print(f"输入: x = {x2.value}, y = {y2.value} 结果: z = {z2.value}")
-    z2.backward()
-    print(f"\n梯度: ∂z/∂x =  {x2.grad.value} ∂z/∂y = {y2.grad.value}")
-
-        # 之前的复杂函数
-    def goldstein(x, y):
-        z = (1 + (x + y + 1) ** 2 * (19 - 14 * x + 3 * x ** 2 - 14 * y + 6 * x * y + 3 * y ** 2)) * \
-            (30 + (2 * x - 3 * y) ** 2 * (18 - 32 * x + 12 * x ** 2 + 48 * y - 36 * x * y + 27 * y ** 2))
-        return z
-
-    x = Variable(np.array(1.0), "x")
-    y = Variable(np.array(1.0), "y")
-    z = goldstein(x, y)
-    z.name = 'z'  # 给变量命名
-    z.backward()
-
-    graph_util.plot_dot_graph(z, verbose=True, to_file='goldstein.png')
+    print(y)  # variable([[1 4] [2 5] [3 6]])
+    print(z)  # variable([[[1] [4]] [[2] [5]]  [[3] [6]]])
+    y.backward(True)
+    z.backward(True)
+    print(y.grad)
+    print(z.grad)
+    print(x.grad)
