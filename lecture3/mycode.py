@@ -200,7 +200,7 @@ class Exp(Function):
     #反向传播函数，输入和输出都是ndarray类型
     def backward(self,input_dy):
         (out_dy,) = self.output_variable
-        return input_dy * out_dy
+        return input_dy * out_dy().value
 #优化的求指数函数
 def exp(input_variable:Variable):
     input_variable = as_array(input_variable)
@@ -212,9 +212,10 @@ class Sin(Function):
     #求正弦函数
     def forward(self,input_x):
         return np.sin(input_x)
-    #反向传播函数，输入和输出都是非Variable类型
+    #反向传播函数，输入和输出都是
     def backward(self,input_dy):
-        return np.cos(self.input_variable.value) * input_dy
+        (x,) = self.input_variable
+        return np.cos(x.value) * input_dy
 #优化的求正弦函数
 def sin(input_variable:Variable):
     return Sin()(input_variable)
@@ -226,7 +227,8 @@ class Cos(Function):
         return np.cos(input_x)
     #反向传播函数，输入和输出都是非Variable类型
     def backward(self,input_dy):
-        return -np.sin(self.input_variable.value) * input_dy
+        (x,) = self.input_variable
+        return -np.sin(x.value) * input_dy
 #优化的求余弦函数
 def cos(input_variable:Variable):
     return Cos()(input_variable)
