@@ -376,7 +376,7 @@ class Transpose(Function):
         return np.transpose(input_x)
     
     def backward(self,dy): 
-        print(type(dy))
+        print("the type of dy: ",type(dy))
         return np.transpose(dy)
 
 #简化后的转置方法    
@@ -427,7 +427,9 @@ if __name__ == '__main__':
     print(y)  # variable([[1 4] [2 5] [3 6]])
     print(z)  # variable([[[1] [4]] [[2] [5]]  [[3] [6]]])
     y.backward(True)
-    z.backward(True)
+    z.backward(True) 
     print(y.grad)
     print(z.grad)
     print(x.grad)
+
+    
