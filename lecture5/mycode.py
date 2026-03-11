@@ -1,6 +1,6 @@
 import numpy as np
 import weakref
-import lecture5.graph_util as graph_util 
+import graph_util
 #定义一个变量类
 class Variable:
     __array_priority__ = 999
@@ -110,6 +110,15 @@ class Variable:
     def transpose(self):
         return transpose(self)
     
+    def matmul(self,other):
+        return matmul(self,other)
+    
+    #重载@运算符，等价于matmul函数
+    def __matmul__(self,other):
+        return matmul(self,other)
+    
+    def __rmatmul__(self,other):
+        return matmul(other,self)
 
     #运算符重载
 
@@ -248,6 +257,23 @@ class Cos(Function):
 #优化的求余弦函数
 def cos(input_variable:Variable):
     return Cos()(input_variable)
+
+#求双曲正切子类，继承自Function类
+class Tanh(Function):
+    def forward(self,input_x):
+        return np.tanh(input_x)
+    
+    def backward(self,input_dy):
+        (out_dy,) =self.output_variable 
+        return input_dy *(1-(out_dy.value)**2) 
+#简化的求双曲正切函数
+def tanh(input_variable:Variable):
+    return Tanh()(input_variable)
+
+#对数函数子类，继承自Function类
+class Log(Function):
+    def forward(self,input_x):
+        return 
 
 #求绝对值子类，继承自Function类
 class Abs(Function):
@@ -537,35 +563,179 @@ class Sum(Function):
 def sum(input_x,axis=None,keepdims=False):
     return Sum(axis,keepdims)(input_x)
 
-# ========== 辅助函数：逐元素数值梯度（用于标量输出） ==========
-def numerical_gradient(f, x, eps=1e-4):
-    """
-    计算函数 f 在 x 处的数值梯度（f 必须返回标量 Variable）。
-    x : Variable
-    f : 函数，接受一个 Variable 并返回一个标量 Variable
-    返回与 x.value 形状相同的 numpy 数组
-    """
-    x_val = x.value.copy()
-    grad = np.zeros_like(x_val)
-    it = np.nditer(x_val, flags=['multi_index'])
-    while not it.finished:
-        idx = it.multi_index
-        orig = x_val[idx]
+#矩阵乘法类
+class MatMul(Function):
+    def forward(self,input_x,input_W):
+        return input_x @ input_W
+    
+    def backward(self,dy:Variable):
+        input_x,input_w = self.input_variable
+        dx = matmul(dy,input_w.T)
+        dW = matmul(input_x.T,dy)
+        return dx,dW
+#简化的矩阵乘法函数
+def matmul(input_x:Variable,input_W:Variable):
+    #调用Matmul方法，会跳转到基类的call方法，提取输入，然后取.value（类型为ndarray）作为forward的输入
+    #因此forward的输入为ndarray类型，直接使用numpy的@运算即可
+    return MatMul()(input_x,input_W)
 
-        # 正扰动
-        x_plus = x_val.copy()
-        x_plus[idx] = orig + eps
-        y_plus = f(Variable(x_plus)).value
+#线性计算类
+class Linear(Function):
+    #入参和出参都是ndarray类型
+    def forward(self,x,W,b):
+        y = x.dot(W)
+        if b is not None: 
+            y += b
+        return y
+    
+    def backward(self, gy:Variable):
+        x,W,b = self.input_variable
+        db = None if b.value is None else sum_to(gy,b.shape)
+        dx = matmul(gy,W.T)
+        dW = matmul(x.T,gy)
+        return dx,dW,db
 
-        # 负扰动
-        x_minus = x_val.copy()
-        x_minus[idx] = orig - eps
-        y_minus = f(Variable(x_minus)).value
+def linear(x,W,b=None):
+    return Linear()(x,W,b)
 
-        grad[idx] = (y_plus - y_minus) / (2 * eps)
-        it.iternext()
+#均方误差类
+class MeanSquaredError(Function):
+    def forward(self,input_x0,input_x1):
+        diff = input_x0-input_x1
+        y = (diff ** 2).sum()/len(diff)
+        return y
+    
+    def backward(self,dy):
+        x0,x1 = self.input_variable
+        diff = x0 - x1
+        dx0 = dy*diff*(2. /len(diff))
+        dx1 = -dx0
+        return dx0,dx1
+#简化的均方误差计算函数
+def mean_squared_error(x0,x1):
+    return MeanSquaredError()(x0,x1)
+
+#验证矩阵反向传播(计算x梯度)
+def numerical_gradient_matrix_x(f,x,W,eps=1e-4):
+    #获取x的原始数据
+    x_data = x.value
+    grad = np.zeros_like(x_data)
+
+    #对x的每个元素进行扰动
+    for idx in np.ndindex(x_data.shape):
+        x_plus = x_data.copy()
+        x_minus = x_data.copy()
+        #正向扰动
+        x_plus[idx]=x_plus[idx]+eps
+        y1=f(Variable(as_array(x_plus)),W)
+        #负向扰动
+        x_minus[idx] = x_minus[idx] - eps
+        y2 = f(Variable(as_array(x_minus)),W)
+        #中心差分法计算梯度
+        temp = (y1-y2).value
+        grad[idx] = temp/(2*eps)
     return grad
 
+#验证矩阵反向传播（记录W梯度）
+def numerical_gradient_matrix_w(f,x,W,eps=1e-4):
+    #获取W的原始数据
+    W_data = W.value
+    grad = np.zeros_like(W_data)
+    #对W的每个元素进行扰动
+    for idx in np.ndindex(W_data.shape):
+        W_plus = W_data.copy()
+        W_minus = W_data.copy()
+        #正向扰动
+        W_plus[idx] = W_plus[idx] + eps
+        y1 = f(x,Variable(as_array(W_plus)))
+        #负向扰动
+        W_minus[idx] = W_minus[idx] - eps
+        y0 = f(x,Variable(as_array(W_minus)))
+        #中心差分法计算梯度
+        temp = (y1-y0).value
+        grad[idx] = temp/(2*eps)
+    return grad
 
+def tempFunc(x,y):
+    t = x @ y
+    return sum(t)
 if __name__ == '__main__':
-    pass
+    # # 向量的内积
+    # a = np.array([1, 2, 3])
+    # b = np.array([4, 5, 6])
+    # c = np.dot(a, b)
+    # print(c)  # 32
+    # # 矩阵的乘积
+    # a = np.array([[1, 2], [3, 4]])
+    # b = np.array([[5, 6], [7, 8]])
+    # c = np.matmul(a, b) # np 中的矩阵乘积
+    # print(c)  # [[19 22] [43 50]]
+    # d = np.matmul(b, a)  # b 乘 a 得到的结果不一样
+    # print(d)  # [[23 34] [31 46]]
+    # x = Variable(np.array([[1, 2]]))
+    # W = Variable(np.array([[5, 6], [7, 8]]))
+    # y = matmul(x, W)
+    # y.backward()
+    # print(x.shape, W.shape)
+    # print(y)  # variable([[19 22]])
+    # print(x.grad)  # variable([[11 15]])
+    # print(W.grad)  # variable([[1 1][2 2]])
+    # x = np.random.rand(100,1)
+    # y = 30 * x + 50 + np.random.rand(100,1)
+    # x,y = Variable(x),Variable(y)
+    # W = Variable(np.zeros((1,1)))
+    # b = Variable(np.zeros(1))
+
+    # def predict(x):
+    #     return matmul(x,W)+b
+    
+    # def mean_squared_error(x0,x1):
+    #     diff = x1-x0
+    #     return sum(diff ** 2)/len(diff)
+    
+    # lr = 0.05
+    # iters = 1000 
+
+    # for i in range(iters):
+    #     print("W:",W.value)
+    #     print("b:",b.value)
+    #     y_predict = predict(x)
+    #     loss = mean_squared_error(y,y_predict)
+    #     loss.backward()
+
+    #     W.value -= lr * W.grad.value
+    #     b.value -= lr * b.grad.value
+
+    #     W.grad = None
+    #     b.grad = None
+    
+    # print("W:",W.value)
+    # print("b:",b.value)
+    # x = Variable(np.array([[1, 2]], dtype=np.float64))  # (1, 2)
+    # W = Variable(np.array([[5, 6], [7, 8]], dtype=np.float64))  # (2, 2)
+
+    # result = tempFunc(x, W)
+    # result.backward()
+
+    # print(x.grad,"\n", W.grad)  # Variable 反向传播的结果
+
+    # print(numerical_gradient_matrix_x(tempFunc, x, W)) # 数值微分法
+    # print(numerical_gradient_matrix_w(tempFunc, x, W)) # 数值微分法
+
+    x = np.random.rand(100,1)
+    y = 30 * x + 50 + np.random.rand(100, 1)
+    W = Variable(np.zeros((1, 1)))  # 初始化权重为 0
+    b = Variable(np.zeros(1))  # 初始化偏置为 0
+    lr = 0.1
+    iters = 100
+    for i in range(iters):
+        y_predict = linear(x,W,b)
+        loss = mean_squared_error(y,y_predict)
+        loss.backward()
+        W.value -= lr * W.grad.value
+        b.value -= lr * b.grad.value
+        W.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
+        b.grad = None
+    print("W: ",W.value)
+    print("b: ",b.value)
+

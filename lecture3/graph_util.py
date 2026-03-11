@@ -3,7 +3,7 @@ import subprocess
 
 import numpy as np
 
-from mycode import Variable
+from lecture5.mycode import Variable
 
 
 def _dot_var(v, verbose=True):
