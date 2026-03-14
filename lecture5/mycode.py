@@ -722,20 +722,69 @@ if __name__ == '__main__':
     # print(numerical_gradient_matrix_x(tempFunc, x, W)) # 数值微分法
     # print(numerical_gradient_matrix_w(tempFunc, x, W)) # 数值微分法
 
-    x = np.random.rand(100,1)
-    y = 30 * x + 50 + np.random.rand(100, 1)
-    W = Variable(np.zeros((1, 1)))  # 初始化权重为 0
-    b = Variable(np.zeros(1))  # 初始化偏置为 0
-    lr = 0.1
-    iters = 100
-    for i in range(iters):
-        y_predict = linear(x,W,b)
-        loss = mean_squared_error(y,y_predict)
-        loss.backward()
-        W.value -= lr * W.grad.value
-        b.value -= lr * b.grad.value
-        W.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
-        b.grad = None
-    print("W: ",W.value)
-    print("b: ",b.value)
+    # x = np.random.rand(100,1)
+    # y = 30 * x + 50 + np.random.rand(100, 1)
+    # W = Variable(np.zeros((1, 1)))  # 初始化权重为 0
+    # b = Variable(np.zeros(1))  # 初始化偏置为 0
+    # lr = 0.1
+    # iters = 100
+    # for i in range(iters):
+    #     y_predict = linear(x,W,b)
+    #     loss = mean_squared_error(y,y_predict)
+    #     loss.backward()
+    #     W.value -= lr * W.grad.value
+    #     b.value -= lr * b.grad.value
+    #     W.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
+    #     b.grad = None
+    # print("W: ",W.value)
+    # print("b: ",b.value)
 
+        # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
+    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))
+    y = exp(x)  # 真实值
+
+# 简单的两层网络
+    W1 = Variable(1 * np.random.randn(1, 100))
+    b1 = Variable(np.zeros(100))
+    W2 = Variable(1 * np.random.randn(100, 1))
+    b2 = Variable(np.zeros(1))
+
+    def abs_loss(x0, x1):
+        diff = abs(x1 - x0)
+        return sum(diff) / len(diff)  # 除以样本数量, 防止误差过大溢出以及学习率无法调整
+    
+    def sigmoid_simple(x):
+        y = 1/(1+exp(-x))
+        return y
+    
+    def predict(x):
+        temp = matmul(x, W1) + b1
+        temp = sigmoid_simple(temp)
+        result = matmul(temp, W2) + b2
+        return result
+
+    lr = 0.03  # 学习率
+    iters = 10000  # 迭代次数
+
+    for epoch in range(iters):
+        y_predit = predict(x)
+        loss = abs_loss(y, y_predit)
+
+        loss.backward()  # 损失函数反向传播
+
+        W1.value -= lr * W1.grad.value
+        b1.value -= lr * b1.grad.value
+        W2.value -= lr * W2.grad.value
+        b2.value -= lr * b2.grad.value
+
+        W1.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
+        b1.grad = None
+        W2.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
+        b2.grad = None
+
+        if epoch % 100 == 0:  # 每100次，打印输出一下损失值
+            print(f"{epoch}: loss={loss.value:.4f}")
+
+        test_x = 3
+    print(np.exp(test_x))
+    print(predict(Variable(np.array([test_x]))))
