@@ -1,6 +1,6 @@
 import numpy as np
 import weakref
-import lecture6.graph_util as graph_util 
+import graph_util as g
 #定义一个变量类
 class Variable:
     __array_priority__ = 999
@@ -17,9 +17,13 @@ class Variable:
     #设置变量梯度
     def set_grad(self,grad):
         self.grad = grad
+    
+    #重置变量梯度
+    def clear_grad(self):
+        self.grad = None
 
     #默认不保留中间变量的导数
-    def backward(self,retain_grad=False):
+    def backward(self,retain_grad=True):
         if self.grad is None: 
             self.grad = Variable(np.ones_like(self.value)) #初始化梯度为1(向量1)
         #创建一个列表来存储需要处理的函数
@@ -62,7 +66,7 @@ class Variable:
         if self.creator is None:
             return 0
         else:
-            return self.creator.generation
+            return self.creator.generation+1
         
     #Variable的形状
     @property
@@ -110,6 +114,15 @@ class Variable:
     def transpose(self):
         return transpose(self)
     
+    def matmul(self,other):
+        return matmul(self,other)
+    
+    #重载@运算符，等价于matmul函数
+    def __matmul__(self,other):
+        return matmul(self,other)
+    
+    def __rmatmul__(self,other):
+        return matmul(other,self)
 
     #运算符重载
 
@@ -148,7 +161,12 @@ class Variable:
     
     def __abs__(self):
         return abs(self)
+
+class Parameter(Variable):
     
+    def clear_grad(self):
+        self.grad = None
+
 #将标量输入转化为矢量
 def as_array(input_data):
     if np.isscalar(input_data):
@@ -248,6 +266,30 @@ class Cos(Function):
 #优化的求余弦函数
 def cos(input_variable:Variable):
     return Cos()(input_variable)
+
+#求双曲正切子类，继承自Function类
+class Tanh(Function):
+    def forward(self,input_x):
+        return np.tanh(input_x)
+    
+    def backward(self,input_dy):
+        (out_dy,) =self.output_variable 
+        return input_dy *(1-(out_dy.value)**2) 
+#简化的求双曲正切函数
+def tanh(input_variable:Variable):
+    return Tanh()(input_variable)
+
+#对数函数子类，继承自Function类
+class Log(Function):
+    def forward(self,input_x):
+        return np.log(input_x)
+    
+    def backward(self,input_dy):
+        (x,) = self.input_variable
+        return input_dy/x
+#简化的对数函数
+def log(input_variable:Variable):
+    return Log()(input_variable)    
 
 #求绝对值子类，继承自Function类
 class Abs(Function):
@@ -438,10 +480,8 @@ class Transpose(Function):
     def forward(self,input_x):
         return np.transpose(input_x)
     
-    def backward(self,dy): 
-        temp = dy.value
-        return np.transpose(temp)
-
+    def backward(self,dy:Variable): 
+        return transpose(dy)
 #简化后的转置方法    
 def transpose(input_x:Variable):
     return Transpose()(as_array(input_x))
@@ -532,182 +572,383 @@ class Sum(Function):
         #将梯度广播回原始形状
         dx = broadcast_to(dy_reshaped,self.origin_shape)
         return dx
-
 #简化后的通用求和函数
 def sum(input_x,axis=None,keepdims=False):
     return Sum(axis,keepdims)(input_x)
 
-# ========== 辅助函数：逐元素数值梯度（用于标量输出） ==========
-def numerical_gradient(f, x, eps=1e-4):
-    """
-    计算函数 f 在 x 处的数值梯度（f 必须返回标量 Variable）。
-    x : Variable
-    f : 函数，接受一个 Variable 并返回一个标量 Variable
-    返回与 x.value 形状相同的 numpy 数组
-    """
-    x_val = x.value.copy()
-    grad = np.zeros_like(x_val)
-    it = np.nditer(x_val, flags=['multi_index'])
-    while not it.finished:
-        idx = it.multi_index
-        orig = x_val[idx]
+#矩阵乘法类
+class MatMul(Function):
+    def forward(self,input_x,input_W):
+        return input_x @ input_W
+    
+    def backward(self,dy:Variable):
+        input_x,input_w = self.input_variable
+        dx = matmul(dy,input_w.T)
+        dW = matmul(input_x.T,dy)
+        return dx,dW
+#简化的矩阵乘法函数
+def matmul(input_x:Variable,input_W:Variable):
+    #调用Matmul方法，会跳转到基类的call方法，提取输入，然后取.value（类型为ndarray）作为forward的输入
+    #因此forward的输入为ndarray类型，直接使用numpy的@运算即可
+    return MatMul()(input_x,input_W)
 
-        # 正扰动
-        x_plus = x_val.copy()
-        x_plus[idx] = orig + eps
-        y_plus = f(Variable(x_plus)).value
+#线性计算类
+class Linear(Function):
+    #入参和出参都是ndarray类型
+    def forward(self,x,W,b):
+        y = x.dot(W)
+        if b is not None: 
+            y += b
+        return y
+    
+    def backward(self, gy:Variable):
+        x,W,b = self.input_variable
+        db = None if b.value is None else sum_to(gy,b.shape)
+        dx = matmul(gy,W.T)
+        dW = matmul(x.T,gy)
+        return dx,dW,db
+#简化后的线性计算函数
+def linear(x,W,b=None):
+    return Linear()(x,W,b)
 
-        # 负扰动
-        x_minus = x_val.copy()
-        x_minus[idx] = orig - eps
-        y_minus = f(Variable(x_minus)).value
+#均方误差类
+class MeanSquaredError(Function):
+    def forward(self,input_x0,input_x1):
+        diff = input_x0-input_x1
+        y = (diff ** 2).sum()/len(diff)
+        return y
+    
+    def backward(self,dy):
+        x0,x1 = self.input_variable
+        diff = x0 - x1
+        dx0 = dy*diff*(2. /len(diff))
+        dx1 = -dx0
+        return dx0,dx1
+#简化的均方误差计算函数
+def mean_squared_error(x0,x1):
+    return MeanSquaredError()(x0,x1)
 
-        grad[idx] = (y_plus - y_minus) / (2 * eps)
-        it.iternext()
+#绝对差
+def abs_loss(x0,x1):
+    diff = abs(x1-x0)
+    return sum(diff) / len(diff)
+
+#验证矩阵反向传播(计算x梯度)
+def numerical_gradient_matrix_x(f,x,W,eps=1e-4):
+    #获取x的原始数据
+    x_data = x.value
+    grad = np.zeros_like(x_data)
+
+    #对x的每个元素进行扰动
+    for idx in np.ndindex(x_data.shape):
+        x_plus = x_data.copy()
+        x_minus = x_data.copy()
+        #正向扰动
+        x_plus[idx]=x_plus[idx]+eps
+        y1=f(Variable(as_array(x_plus)),W)
+        #负向扰动
+        x_minus[idx] = x_minus[idx] - eps
+        y2 = f(Variable(as_array(x_minus)),W)
+        #中心差分法计算梯度
+        temp = (y1-y2).value
+        grad[idx] = temp/(2*eps)
     return grad
 
-def test_sum():
-    print("\n" + "="*60)
-    print("开始测试 Sum 类与 sum 函数")
-    print("="*60)
+#验证矩阵反向传播（记录W梯度）
+def numerical_gradient_matrix_w(f,x,W,eps=1e-4):
+    #获取W的原始数据
+    W_data = W.value
+    grad = np.zeros_like(W_data)
+    #对W的每个元素进行扰动
+    for idx in np.ndindex(W_data.shape):
+        W_plus = W_data.copy()
+        W_minus = W_data.copy()
+        #正向扰动
+        W_plus[idx] = W_plus[idx] + eps
+        y1 = f(x,Variable(as_array(W_plus)))
+        #负向扰动
+        W_minus[idx] = W_minus[idx] - eps
+        y0 = f(x,Variable(as_array(W_minus)))
+        #中心差分法计算梯度
+        temp = (y1-y0).value
+        grad[idx] = temp/(2*eps)
+    return grad
 
-    # 测试用例： (输入形状, axis, keepdims, 是否为标量输出)
-    test_cases = [
-        # 1D 数组
-        ((5,), None, False, True),
-        ((5,), 0, False, True),          # axis=0 对1D等价于所有轴
-        ((5,), 0, True, False),           # keepdims=True 输出形状 (1,)
-        # 2D 数组
-        ((3, 4), None, False, True),
-        ((3, 4), 0, False, False),
-        ((3, 4), 1, True, False),
-        ((3, 4), (0, 1), False, True),    # 所有轴求和 -> 标量
-        ((3, 4), (0, 1), True, False),    # keepdims=True 输出形状 (1,1)
-        # 3D 数组
-        ((2, 3, 4), None, False, True),
-        ((2, 3, 4), 0, False, False),
-        ((2, 3, 4), 1, True, False),
-        ((2, 3, 4), (0, 2), False, False),
-        ((2, 3, 4), (0, 1, 2), False, True),  # 所有轴求和 -> 标量
-    ]
-
-    for i, (shape, axis, keepdims, is_scalar_out) in enumerate(test_cases):
-        print(f"\n--- 测试用例 {i+1}: shape={shape}, axis={axis}, keepdims={keepdims} ---")
-        
-        # 创建随机输入（转换为 Variable）
-        np.random.seed(42 + i)  # 可重现
-        data = np.random.randn(*shape).astype(np.float32)
-        x = Variable(data)
-        
-        # 1. 正向传播验证
-        y = sum(x, axis=axis, keepdims=keepdims)
-        y_expected = np.sum(data, axis=axis, keepdims=keepdims)
-        
-        # 提取 y 的值（可能是 Variable 或 ndarray）
-        if isinstance(y, Variable):
-            y_val = y.value
-        else:
-            y_val = y  # 理论上 sum 总是返回 Variable，但保险
-        
-        assert np.allclose(y_val, y_expected), \
-            f"正向结果错误: 得到 {y_val}, 期望 {y_expected}"
-        print("✅ 正向传播结果正确")
-        
-        # 2. 反向传播验证（解析梯度应全为 1）
-        y.backward()  # 默认 dy = 1
-        x_grad = x.grad.value if x.grad is not None else None
-        expected_grad = np.ones_like(data)
-        assert x_grad is not None, "梯度未计算"
-        assert np.allclose(x_grad, expected_grad), \
-            f"解析梯度错误: 得到 {x_grad}, 期望 {expected_grad}"
-        print("✅ 反向传播梯度正确（全1）")
-        
-        # 3. 如果输出是标量，额外进行数值梯度验证
-        if is_scalar_out:
-            # 定义函数 f(x) = sum(x, axis, keepdims) 返回标量
-            def f(x_var):
-                return sum(x_var, axis=axis, keepdims=keepdims)
-            
-            num_grad = numerical_gradient(f, x)
-            assert np.allclose(num_grad, expected_grad, atol=1e-2), \
-                f"数值梯度与解析梯度不匹配: 数值 {num_grad}, 解析 {expected_grad}"
-            print("✅ 数值梯度验证通过")
-        else:
-            print("⏩ 输出非标量，跳过数值梯度验证")
+#Sigmoid激活函数类
+class Sigmoid(Function):
+    def forward(self,input_x):
+        return  1/(1+np.exp(-input_x))
     
-    print("\n" + "="*60)
-    print("所有 sum 测试通过！")
-    print("="*60)
+    #反向传播函数，输入和输出都是Variable类型
+    def backward(self,input_dy):
+        (out_dy,) = self.output_variable
+        return input_dy * out_dy().value*(1-out_dy().value)
+#简化的sigmoid激活函数
+def sigmoid(x:Variable):
+    return Sigmoid()(x)
 
-def temp_fun(x, y):
-    return pow(x + 1, 2) * neg(y) - abs(x - y)
+#ReLu激活函数类
+class Relu(Function):
+    def forward(self,input_x):
+        self.mask = (x<=0) #保存x<=0的位置掩码，用于反向传播
+        y = x.copy()
+        y[self.mask]=0 #将<=0的元素置零
+        return y
+    def backward(self,input_dy):
+        (x,)=self.input_variable
+        #当x大于0时梯度为input_dy,否则梯度为0
+        return input_dy * (x.value>0)
+#简化的relu激活函数
+def relu(x:Variable):
+    return Relu()(x)
+
+#Layer层
+class Layer:
+    def __init__(self):
+        self.params_name = set() #初始化为无序的集合
+
+    def __setattr__(self, name, value):
+        #只收集Parameter,不搜集Variable和其他类型
+        if isinstance(value,(Parameter,Layer)):
+            self.params_name.add(name)
+        #调用父类的setattr方法，否则不会真正为属性赋值
+        super().__setattr__(name,value)
+
+    def __call__(self,*inputs):
+        outputs = self.forward(*inputs)
+        if not isinstance(outputs,tuple):
+            outputs = (outputs,)
+        #tuple不变，转换为list类型
+        self.inputs,self.outputs = list(inputs),list(outputs)
+        return outputs if len(outputs) > 1 else outputs[0]
+
+    def forward(self,inputs):
+        raise NotImplementedError
+    
+    #递归获取所有变量,yield方式
+    def params(self):
+        for name in self.params_name:
+            #生成器可以一个一个返回参数
+            obj =  self.__dict__[name]
+            if isinstance(obj,Layer): #如果是Layer层，递归yield
+                yield from obj.params()
+            else:
+                yield obj
+
+    #清楚所有参数的梯度
+    def clear_grads(self):
+        for param in self.params():
+            param.clear_grad()
+
+#线性层
+class LinearLayer(Layer):
+    #可以不显式指定入参input_size，在forward中根据输入动态确定
+    def __init__(self,output_size,input_size=None,need_bias=True,dtype=np.float32):
+        super().__init__()
+        self.input_size,self.output_size,self.dtype=input_size,output_size,dtype
+        self.W = Parameter(None,name="W")
+        if self.input_size is not None:
+            self._init_W()
+        self.b = None
+        if need_bias:
+            self.b = Parameter(np.zeros(output_size).astype(dtype),name="b")
+    
+        
+    #延迟初始化
+    def _init_W(self):
+    #根据输入和输出的维度，初始化权重矩阵W，使用了Xavier初始化方法，避免梯度爆炸，梯度消失等问题
+        self.W.value = np.random.randn(self.input_size, self.output_size).astype(self.dtype) * np.sqrt(
+        2.0 / (self.input_size + self.output_size))
+    #前向线性计算
+    def forward(self,inputs):
+        #如果之前没有指定输入维度，这里根据第一个输入的形状动态确定，并且初始化权重矩阵W
+        if self.W.value is None:
+            if self.input_size is None:
+                self.input_size = inputs.shape[1]
+                self._init_W()
+            self._init_W()
+        return linear(inputs,self.W,self.b)
+
+#模型类
+class Model(Layer):
+    def plot(self,*inputs,to_file="model.png"):
+        y = self.forward(*inputs)
+        return g.plot_dot_graph(y,verbose=True,to_file=to_file)
+
+#两层网络
+class TwoLayerNet(Model):
+    def __init__(self,hidden_size,output_size,dtype=np.float32):
+        super().__init__()
+        self.l1 = LinearLayer(hidden_size,dtype=dtype)
+        self.l2 = LinearLayer(output_size,dtype=dtype)
+
+    def forward(self,x):
+        h = sigmoid(self.l1(x))
+        return self.l2(h)
+
+#任意N层网络模型，即MLP模型
+class MultiLayerNet(Model):
+    def __init__(self,hidden_size:list,output_size,dtype=np.float32):
+        super().__init__()
+        self.layers = []
+        for i in range(len(hidden_size)):
+            self.layers.append(LinearLayer(hidden_size[i],dtype=dtype))
+            self.layers.append(sigmoid)
+        #最后一层的输出形状是 output_size
+        self.layers.append(LinearLayer(output_size,dtype=dtype))
+    
+    def forward(self,x):
+        #最后一层不需要激活函数，所以循环到倒数第二层
+        for layer in self.layers[:-1]:
+            x = layer(x)
+        #最后一层不需要激活函数
+        return self.layers[-1](x)
+
+    def params(self):
+        #首先获取通过属性注册的参数
+        yield from super().params()
+        #然后遍历self.layers中的每个Layer对象，获取其参数
+        for layer in self.layers:
+            if isinstance(layer,Layer):
+                yield from layer.params()
+
 
 if __name__ == '__main__':
-    # x = as_variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    # y = transpose(x)
-    # z = transpose(x)
+    # x = np.random.randn(100,1)
+    # y = np.sin(2*np.pi*x)+np.random.randn(100,1)
+    # l1 = LinearLayer(10) #输出维度是10
+    # l2 = LinearLayer(1) #输出维度是1
 
-    # print(y)  # variable([[1 4] [2 5] [3 6]])
-    # print(z)  # variable([[1 4] [2 5] [3 6]])
-    # y.backward(True)
-    # z.backward(True) 
-    # print(y.grad)
-    # print(z.grad)
-    # print(x.grad)
+    # model = Layer()
+    # model.l1 = LinearLayer(10)
+    # model.l2 = LinearLayer(1)
+    # def predict(x):
+    #     h = model.l1(x)
+    #     y = sigmoid(h)
+    #     return model.l2(y)
+    
+    # lr = 0.2 #学习率
+    # iters = 100000 #迭代次数
 
-    # y = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    # z = Variable(np.array([[[1, 2, 3], [4, 5, 6]]]))
-    # print(y.transpose())  # variable([[1 4] [2 5] [3 6]])
-    # print(z.T)  # variable([[[1] [4]] [[2] [5]]  [[3] [6]]])
-    # x = np.array([1, 2, 3])  # 形状 shape 是 (3,)  维度数 ndim 是 1
-    # y = np.broadcast_to(x, (2, 3))   # 形状shape (2,3) 维度数 ndim 是 2
-    # print(y)  # [[1 2 3] [1 2 3]]
+    # for i in range(iters):
+    #     y_predict = predict(x)
+    #     loss = mean_squared_error(y,y_predict)
+    #     model.clear_grads()
+    #     loss.backward()
+    #     for p in model.params():
+    #         p.value -= lr*p.grad.value
+    #     if i%100 ==0:
+    #         print(f"iter {i},loss: {loss.value:.4f}")
+    # x = np.random.randn(100,1)
+    # y = np.sin(2*np.pi*x)+np.random.randn(100,1)
 
-    x1 = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    x2 = Variable(np.array([[1, 2, 3]]))
-    y = x1 + x2
-    y.backward()
-    print("y:", y)  # [[2,4,6],[5,7,9]]
-    print("x1.grad:", x1.grad)  # [[1 1 1] [1 1 1]]
-    print("x2.grad:", x2.grad)  # [[1 1 1] [1 1 1]] 但实际上应该是 [2,2,2]
-        # ========== 测试减法 ==========
-    print("\n" + "="*50)
-    print("测试减法：x1 - x2")
-    x1 = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    x2 = Variable(np.array([[1, 2, 3]]))
-    y_sub = x1 - x2
-    y_sub.backward()
-    print("y_sub:", y_sub)  # 期望：[[0,0,0], [3,3,3]]
-    print("x1.grad (减法):", x1.grad)  # 期望：[[1,1,1], [1,1,1]] （因为每个元素对y的贡献都是1）
-    print("x2.grad (减法):", x2.grad)  # 期望：[[-1,-1,-1], [-1,-1,-1]] ？注意广播时x2被复制了两行，梯度应为每列求和，但这里由于x2形状是(1,3)，正确的梯度应该是[[-2,-2,-2]]（求和后形状(1,3)）。但当前实现Sub.backward返回(input_dy1, -input_dy2)，且广播处理只对输入形状不同的情况求和，所以x2.grad应该是[[-1,-1,-1],[-1,-1,-1]]？这取决于sum_to函数的效果。预期正确实现应是：梯度累加后形状恢复为(1,3)，值为[[-2,-2,-2]]。根据您提供的代码，可能因为sum_to函数问题导致结果不符，但测试语句本身应该输出实际结果供分析。
+    # lr = 0.2
+    # max_iter = 10000
+    # hidden_size = 10
+    # model = TwoLayerNet(hidden_size,1)
+    # for i in range(max_iter):
+    #     #前向传播
+    #     y_predict = model(x)
+    #     #计算损失
+    #     loss =  mean_squared_error(y_predict,y)
+    #     #重置权重并反向传播
+    #     model.clear_grads()
+    #     loss.backward()
 
-    # ========== 测试乘法 ==========
-    print("\n" + "="*50)
-    print("测试乘法：x1 * x2")
-    x1 = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    x2 = Variable(np.array([[1, 2, 3]]))
-    y_mul = x1 * x2
-    y_mul.backward()
-    print("y_mul:", y_mul)  # 期望：[[1*1,2*2,3*3], [4*1,5*2,6*3]] = [[1,4,9], [4,10,18]]
-    print("x1.grad (乘法):", x1.grad)  # 期望：x2广播后的值：[[1,2,3], [1,2,3]]
-    print("x2.grad (乘法):", x2.grad)  # 期望：x1广播后按列求和：x1 = [[1,2,3],[4,5,6]]，对列求和得[[5,7,9]]，形状(1,3)
+    #     for param in model.params():
+    #         param.value -= lr*param.grad.value
+        
+    #     if i % 100 == 0:
+    #         print(f"迭代{i}: 损失{loss.value:.4f}")
+    
+    # model.plot(x)
 
-    # ========== 测试除法 ==========
-    print("\n" + "="*50)
-    print("测试除法：x1 / x2")
-    x1 = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    x2 = Variable(np.array([[1, 2, 3]]))
-    y_div = x1 / x2
-    y_div.backward()
-    print("y_div:", y_div)  # 期望：[[1/1,2/2,3/3], [4/1,5/2,6/3]] = [[1,1,1], [4,2.5,2]]
-    print("x1.grad (除法):", x1.grad)  # 期望：1/x2广播后的值：[[1/1,1/2,1/3], [1/1,1/2,1/3]] = [[1,0.5,0.3333], [1,0.5,0.3333]]
-    print("x2.grad (除法):", x2.grad)  # 期望：-x1/(x2^2)广播后按列求和：x1/(x2^2) = [[1/1^2,2/2^2,3/3^2], [4/1^2,5/2^2,6/3^2]] = [[1,0.5,0.3333], [4,1.25,0.6667]]，求和后得[[-5, -1.75, -1.0]]，形状(1,3)
+        # 单层网络训练
+    def train_single_layer_net(x, y, lr, iters, output_size, loss_func):
+        model = LinearLayer(output_size)
+        lastLoss = Variable(np.array(0))
+        for epoch in range(iters):
+            y_predit = model(x)
+            loss = loss_func(y, y_predit)
+            loss.backward()  # 损失函数反向传播
+            # 更新参数
+            for param in model.params():
+                param.value -= lr * param.grad.value
+            model.clear_grads()
+            # # 打印损失值
+            # if epoch % 100 == 0:
+            #     print(f"{epoch}: loss={loss.value:.4f}")
+            lastLoss = loss.value
 
-    #测试转置
-    x = as_variable(np.array([[1,2,3],[4,5,6]]))
-    trans = Transpose()
-    res = trans.backward(x)
-    print(res)
+        # 打印最后的损失值
+        print(f"单层模型的最终损失值是 {lastLoss:.4f}")
+        return model
 
-    #测试sum
-    test_sum()
+
+    # 双层网络训练, 多了一个 hidden_size 参数
+    def train_two_layer_net(x, y, lr, iters, hidden_size, output_size, loss_func):
+        model = TwoLayerNet(hidden_size, output_size)
+        lastLoss = Variable(np.array(0))
+        for epoch in range(iters):
+            y_predit = model(x)
+            loss = loss_func(y, y_predit)
+            loss.backward()  # 损失函数反向传播
+            # 更新参数
+            for param in model.params():
+                param.value -= lr * param.grad.value
+            model.clear_grads()
+            # # 打印损失值
+            # if epoch % 100 == 0:
+            #     print(f"{epoch}: loss={loss.value:.4f}")
+            lastLoss = loss.value
+        # 打印最后的损失值
+        print(f"双层模型的最终损失值是 {lastLoss:.4f}")
+        return model
+
+
+    # 多层网络[MLP]，多了一个 hidden_sizes 参数，是一个列表，每个元素是隐藏层的神经元数量
+    def train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, loss_func):
+        model = MultiLayerNet(hidden_sizes, output_size)
+        lastLoss = Variable(np.array(0))
+        for epoch in range(iters):
+            y_predit = model(x)
+            loss = loss_func(y, y_predit)
+            loss.backward()  # 损失函数反向传播
+            # 更新参数
+            for param in model.params():
+                param.value -= lr * param.grad.value
+            model.clear_grads()
+             # 打印损失值
+            if epoch % 100 == 0:
+                print(f"{epoch}: loss={loss.value:.4f}")
+            lastLoss = loss.value
+        # 打印最后的损失值
+        print(f"多层模型的最终损失值是 {lastLoss:.4f}")
+        return model
+
+
+    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
+    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
+    y = exp(x)  # 真实值
+
+    lr = 0.03  # 学习率
+    iters = 10000  # 迭代次数
+    hidden_size = 50  # 双层网络时，中间隐藏层的神经元数量
+    hidden_sizes = [hidden_size, hidden_size]  # 多层网络时，每个隐藏层的神经元数量，例如这里3层
+    output_size = 1
+
+    # 分别使用单层/双层/多层网络进行训练， 对比效果
+    #model_1_trained = train_single_layer_net(x, y, lr, iters, output_size, abs_loss)
+    #model_2_trained = train_two_layer_net(x, y, lr, iters, hidden_size, output_size, abs_loss)
+    model_3_trained = train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, abs_loss)
+
+    # 预测
+    test_x = Variable(np.array([1.5]))
+   # y_predit_1 = model_1_trained(test_x)  # 模型1的预测值
+    #y_predit_2 = model_2_trained(test_x)  # 模型2的预测值
+    y_predit_3 = model_3_trained(test_x)  # 模型3的预测值
+    y = exp(test_x)  # 真实值
+   # print(f"单层模型预测的结果是 {y_predit_1.value} 真实值 {y.value}")
+   # print(f"双层模型预测的结果是 {y_predit_2.value} 真实值 {y.value}")
+    print(f"多层模型预测的结果是 {y_predit_3.value} 真实值 {y.value}")
+    model_3_trained.plot(x)

@@ -3,7 +3,7 @@ import subprocess
 
 import numpy as np
 
-from lecture6.mycode import Variable
+from mycode import Variable
 
 
 def _dot_var(v, verbose=True):
@@ -13,8 +13,8 @@ def _dot_var(v, verbose=True):
     if verbose and v.value is not None:
         if v.name is not None:
             name += ': '
-        name += str(v.value) + ' ' + str(v.dtype)
-   
+       # name += str(v.value) + ' ' + str(v.dtype)
+        name += str(v.dtype)
     return dot_var.format(id(v), name)
 
 
@@ -58,7 +58,7 @@ def get_dot_graph(output, verbose=True):
     return 'digraph g {\n' + txt + '}'
 
 
-def plot_dot_graph(output, verbose=True, to_file='graph_ouput/graph.png'):
+def plot_dot_graph(output, verbose=False, to_file='graph_ouput/graph.png'):
     dot_graph = get_dot_graph(output, verbose)
 
     tmp_dir = os.path.join(os.path.expanduser('~'), '.test')

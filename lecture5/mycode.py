@@ -273,7 +273,14 @@ def tanh(input_variable:Variable):
 #对数函数子类，继承自Function类
 class Log(Function):
     def forward(self,input_x):
-        return 
+        return np.log(input_x)
+    
+    def backward(self,input_dy):
+        (x,) = self.input_variable
+        return input_dy/x
+#简化的对数函数
+def log(input_variable:Variable):
+    return log()(input_variable)    
 
 #求绝对值子类，继承自Function类
 class Abs(Function):
@@ -467,7 +474,6 @@ class Transpose(Function):
     def backward(self,dy): 
         temp = dy.value
         return np.transpose(temp)
-
 #简化后的转置方法    
 def transpose(input_x:Variable):
     return Transpose()(as_array(input_x))
@@ -558,7 +564,6 @@ class Sum(Function):
         #将梯度广播回原始形状
         dx = broadcast_to(dy_reshaped,self.origin_shape)
         return dx
-
 #简化后的通用求和函数
 def sum(input_x,axis=None,keepdims=False):
     return Sum(axis,keepdims)(input_x)
@@ -594,7 +599,7 @@ class Linear(Function):
         dx = matmul(gy,W.T)
         dW = matmul(x.T,gy)
         return dx,dW,db
-
+#简化后的线性计算函数
 def linear(x,W,b=None):
     return Linear()(x,W,b)
 
@@ -659,132 +664,6 @@ def numerical_gradient_matrix_w(f,x,W,eps=1e-4):
 def tempFunc(x,y):
     t = x @ y
     return sum(t)
+
 if __name__ == '__main__':
-    # # 向量的内积
-    # a = np.array([1, 2, 3])
-    # b = np.array([4, 5, 6])
-    # c = np.dot(a, b)
-    # print(c)  # 32
-    # # 矩阵的乘积
-    # a = np.array([[1, 2], [3, 4]])
-    # b = np.array([[5, 6], [7, 8]])
-    # c = np.matmul(a, b) # np 中的矩阵乘积
-    # print(c)  # [[19 22] [43 50]]
-    # d = np.matmul(b, a)  # b 乘 a 得到的结果不一样
-    # print(d)  # [[23 34] [31 46]]
-    # x = Variable(np.array([[1, 2]]))
-    # W = Variable(np.array([[5, 6], [7, 8]]))
-    # y = matmul(x, W)
-    # y.backward()
-    # print(x.shape, W.shape)
-    # print(y)  # variable([[19 22]])
-    # print(x.grad)  # variable([[11 15]])
-    # print(W.grad)  # variable([[1 1][2 2]])
-    # x = np.random.rand(100,1)
-    # y = 30 * x + 50 + np.random.rand(100,1)
-    # x,y = Variable(x),Variable(y)
-    # W = Variable(np.zeros((1,1)))
-    # b = Variable(np.zeros(1))
-
-    # def predict(x):
-    #     return matmul(x,W)+b
-    
-    # def mean_squared_error(x0,x1):
-    #     diff = x1-x0
-    #     return sum(diff ** 2)/len(diff)
-    
-    # lr = 0.05
-    # iters = 1000 
-
-    # for i in range(iters):
-    #     print("W:",W.value)
-    #     print("b:",b.value)
-    #     y_predict = predict(x)
-    #     loss = mean_squared_error(y,y_predict)
-    #     loss.backward()
-
-    #     W.value -= lr * W.grad.value
-    #     b.value -= lr * b.grad.value
-
-    #     W.grad = None
-    #     b.grad = None
-    
-    # print("W:",W.value)
-    # print("b:",b.value)
-    # x = Variable(np.array([[1, 2]], dtype=np.float64))  # (1, 2)
-    # W = Variable(np.array([[5, 6], [7, 8]], dtype=np.float64))  # (2, 2)
-
-    # result = tempFunc(x, W)
-    # result.backward()
-
-    # print(x.grad,"\n", W.grad)  # Variable 反向传播的结果
-
-    # print(numerical_gradient_matrix_x(tempFunc, x, W)) # 数值微分法
-    # print(numerical_gradient_matrix_w(tempFunc, x, W)) # 数值微分法
-
-    # x = np.random.rand(100,1)
-    # y = 30 * x + 50 + np.random.rand(100, 1)
-    # W = Variable(np.zeros((1, 1)))  # 初始化权重为 0
-    # b = Variable(np.zeros(1))  # 初始化偏置为 0
-    # lr = 0.1
-    # iters = 100
-    # for i in range(iters):
-    #     y_predict = linear(x,W,b)
-    #     loss = mean_squared_error(y,y_predict)
-    #     loss.backward()
-    #     W.value -= lr * W.grad.value
-    #     b.value -= lr * b.grad.value
-    #     W.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
-    #     b.grad = None
-    # print("W: ",W.value)
-    # print("b: ",b.value)
-
-        # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
-    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))
-    y = exp(x)  # 真实值
-
-# 简单的两层网络
-    W1 = Variable(1 * np.random.randn(1, 100))
-    b1 = Variable(np.zeros(100))
-    W2 = Variable(1 * np.random.randn(100, 1))
-    b2 = Variable(np.zeros(1))
-
-    def abs_loss(x0, x1):
-        diff = abs(x1 - x0)
-        return sum(diff) / len(diff)  # 除以样本数量, 防止误差过大溢出以及学习率无法调整
-    
-    def sigmoid_simple(x):
-        y = 1/(1+exp(-x))
-        return y
-    
-    def predict(x):
-        temp = matmul(x, W1) + b1
-        temp = sigmoid_simple(temp)
-        result = matmul(temp, W2) + b2
-        return result
-
-    lr = 0.03  # 学习率
-    iters = 10000  # 迭代次数
-
-    for epoch in range(iters):
-        y_predit = predict(x)
-        loss = abs_loss(y, y_predit)
-
-        loss.backward()  # 损失函数反向传播
-
-        W1.value -= lr * W1.grad.value
-        b1.value -= lr * b1.grad.value
-        W2.value -= lr * W2.grad.value
-        b2.value -= lr * b2.grad.value
-
-        W1.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
-        b1.grad = None
-        W2.grad = None  # 每次迭代后，需要将梯度重置为 0，否则会影响下一次迭代
-        b2.grad = None
-
-        if epoch % 100 == 0:  # 每100次，打印输出一下损失值
-            print(f"{epoch}: loss={loss.value:.4f}")
-
-        test_x = 3
-    print(np.exp(test_x))
-    print(predict(Variable(np.array([test_x]))))
+    pass
