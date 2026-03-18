@@ -161,9 +161,16 @@ class Variable:
     
     def __abs__(self):
         return abs(self)
-
-class Parameter(Variable):
     
+    def __getitem__(self, item):
+        return get_item(self,item)
+    
+    def __log__(self):
+        return log(self)
+
+
+#参数类，继承自Variable类
+class Parameter(Variable): 
     def clear_grad(self):
         self.grad = None
 
@@ -690,8 +697,8 @@ def sigmoid(x:Variable):
 #ReLu激活函数类
 class Relu(Function):
     def forward(self,input_x):
-        self.mask = (x<=0)
-        y = x.copy()
+        self.mask = (input_x<=0)
+        y = input_x.copy()
         y[self.mask]=0 #将<=0的元素置零
         return y
     def backward(self,input_dy):
@@ -701,6 +708,214 @@ class Relu(Function):
 #简化的relu激活函数
 def relu(x:Variable):
     return Relu()(x)
+
+#切片类
+class GetItem(Function):
+    def __init__(self,slices):
+        self.slices = slices
+        self.x_shape = None
+    
+    def forward(self,x):
+        self.x_shape = x.shape
+        y = x[self.slices] #x,y是ndarray类型
+        return y
+    
+    #切片操作，反向传播只需要把对应切片梯度赋过去即可，
+    def backward(self,dy:Variable):
+        #构造一个与原始输入形状相同的0数组
+        dx = np.zeros(self.x_shape,dtype=dy.dtype)
+        #np.add.at 可以实现“稀疏加法”,用于切片梯度还原
+        np.add.at(dx,self.slices,dy.value)
+        #最终要返回的Variable对象
+        return Variable(dx)
+#简化的切片函数
+def get_item(x,slices):
+    return GetItem(slices)(x)
+
+#裁剪类
+class Clip(Function):
+    def __init__(self,x_min,x_max):
+        self.x_min = x_min
+        self.x_max = x_max
+    
+    def forward(self,input_x):
+        return np.clip(input_x,self.x_min,self.x_max)
+    
+    def backward(self, dy:Variable):
+        (x,) = self.input_variable
+        mask = (x.value>=self.x_min) * (x.value<=self.x_max)
+        dx = dy * mask
+        return dx
+#简化的clip函数
+def clip(x,x_min,x_max):
+    return Clip(x_min,x_max)(x)
+
+#softmax和交叉熵一起算
+def softmax_cross_entropy_simple(x,t):
+    x,t = as_variable(x),as_variable(t)
+    N = x.shape[0] #一般x的i的第一个维度是批量数据个数batch size
+    p = softmax_simple(x)
+    p = clip(p,1e-5,1.0) #防止0和1溢出问题
+    log_p  = log(p)
+    tlog_p = log_p[np.arange(N),t.value] #Python高级索引
+    return -1 * sum(tlog_p)/N
+
+#最大类
+class Max(Function):
+    def __init__(self,axis=None,keepdims=False):
+        self.axis = axis
+        self.keepdims = keepdims
+        self.x_shape = None
+        self.argmax = None
+
+    def forward(self,x):
+        #使用np的max函数计算最大值，注意指定轴方向和是否保持梯度
+        y = np.max(x,axis=self.axis,keepdims=self.keepdims)
+        self.x_shape = x.shape #记录输入数组的形状，供反向传播使用
+        #记住哪些元素是最大值，因为反向传播时只有这些位置能获得梯度
+        if  self.axis is None:
+            #(x==y)得到的是一个布尔数组，形状与x相同
+            #他的每个元素都是True或False，对应x中是否等于最大值y
+            self.argmax = x == y
+        else:
+            if self.keepdims:
+                y_broadcast = y
+            else:
+                y_broadcast = np.expand_dims(y,axis=self.axis)
+            self.argmax = (x==y_broadcast)
+        return y
+    
+    def backward(self,dy):
+        dx = np.zeros(self.x_shape, dtype=dy.dtype)
+        # 将 dy 扩展（广播）为与 x 相同的形状
+        if self.axis is None:
+            # 全局最大值：dy 是标量，直接赋值给所有最大值位置
+            dx[self.argmax] = dy.value
+        else:
+            # 指定了轴：需要将 dy 扩展为与 x 相同的形状
+            if self.keepdims:
+                # keepdims=True 时，dy 形状如 (2,1)，需要广播到原始形状
+                dy_broadcast = np.broadcast_to(dy.value, self.x_shape)
+            else:
+                # keepdims=False，dy 比 x 少一维，需要在 axis 处插入一维再广播
+                dy_temp = np.expand_dims(dy.value, axis=self.axis)
+                dy_broadcast = np.broadcast_to(dy_temp, self.x_shape)
+            # 现在 dy_broadcast 的形状与 x 相同，可以用于广播赋值
+            dx[self.argmax] = dy_broadcast[self.argmax]
+        return Variable(dx)
+#简化后的max函数
+def mymax(x,axis=None,keepdims=False):
+    return Max(axis,keepdims)(x)
+
+#最小类
+class Min(Function):
+    def __init__(self,axis=None,keepdims=False):
+        self.axis = axis
+        self.keepdims = keepdims
+        self.x_shape = None
+        self.argmin = None
+
+    def forward(self,x):
+        #使用np的min函数计算最大值，注意指定轴方向和是否保持梯度
+        y = np.min(x,axis=self.axis,keepdims=self.keepdims)
+        self.x_shape = x.shape #记录输入数组的形状，供反向传播使用
+        #记住哪些元素是最大值，因为反向传播时只有这些位置能获得梯度
+        if  self.axis is None:
+            #(x==y)得到的是一个布尔数组，形状与x相同
+            #他的每个元素都是True或False，对应x中是否等于最大值y
+            self.argmin = x == y
+        else:
+            if self.keepdims:
+                y_broadcast = y
+            else:
+                y_broadcast = np.expand_dims(y,axis=self.axis)
+            self.argmin = (x==y_broadcast)
+        return y
+    
+    def backward(self,dy):
+        dx = np.zeros(self.x_shape, dtype=dy.dtype)
+        # 将 dy 扩展（广播）为与 x 相同的形状
+        if self.axis is None:
+            # 全局最小值：dy 是标量，直接赋值给所有最小值位置
+            dx[self.argmin] = dy.value
+            return Variable(dx)
+        else:
+            # 指定了轴：需要将 dy 扩展为与 x 相同的形状
+            if self.keepdims:
+                # keepdims=True 时，dy 形状如 (2,1)，需要广播到原始形状
+                dy_broadcast = np.broadcast_to(dy.value, self.x_shape)
+            else:
+                # keepdims=False，dy 比 x 少一维，需要在 axis 处插入一维再广播
+                dy_temp = np.expand_dims(dy.value, axis=self.axis)
+                dy_broadcast = np.broadcast_to(dy_temp, self.x_shape)
+        # 现在 dy_broadcast 的形状与 x 相同，可以用于广播赋值
+        dx[self.argmin] = dy_broadcast[self.argmin]
+        return Variable(dx)
+#简化后的min函数
+def mymin(x,axis=None,keepdims=False):
+    return Min(axis,keepdims)(x)
+
+#softmax类
+class SoftMax(Function):
+    def __init__(self,axis=1):
+        self.axis = axis
+    def forward(self,input_x):
+        #防止数据溢出，进行缩放
+        x_shift = input_x-input_x.max(axis=self.axis,keepdims=True)
+        y = np.exp(x_shift)
+        y/= y.sum(axis=self.axis,keepdims=True)
+        return y
+    
+    def backward(self,dy):
+        y = self.output_variable[0]
+        dx = y*dy
+        sum_dx = dx.sum(axis=self.axis,keepdims=True)
+        dx -= y*sum_dx
+        return dx
+#简化的softman函数
+def softmax(x,axis=1):
+    return SoftMax(axis)(x)
+
+#另一种计算方式，数学上稳定，避免溢出
+def logsumexp(x,axis=1):
+    m = x.max(axis=axis,keepdims=True)
+    y = x - m 
+    np.exp(y,out = y)
+    s = y.sum(axix=axis,keepdims=True)
+    np.log(s,out=s)
+    m += s
+    return m #最终返回log ∑ exp(xi)
+
+
+#softmax与交叉熵同时计算
+class SoftmaxCrossEntropy(Function):
+    #返回标量损失值
+    def forward(self,x,t):
+        N = x.shape[0]
+        log_z = logsumexp(x,axis=1)
+        log_p = x - log_z #计算每个类别的对数概率
+        log_p = log_p[np.arange[N],t.ravel()] #共N个元素，0,t[0];1,t[1]....
+        y = -log_p.sum() / np.float32(N) #平均交叉熵损失
+        return y
+    
+    def backward(self,dy):
+        #反向传播： dL/dx = （y-one_hot(t)）/N
+        x,t = self.input_variable
+        N, _ =  x.shape
+
+        dy *= 1/N
+        y = softmax(x)
+
+        #构造one-hot
+        one_hot = np.zeros_like(y,dtype=np.float32)
+        one_hot[np.arrange[N],t.value] = 1
+        #softmax + crossentropy的合成梯度
+        y = (y-one_hot) *dy #p-one_hot即是预测与真实之间的差异
+        #正确类别的梯度是负数，错误类别的梯度是正数
+        return y,None
+#简化的交叉熵softmax计算
+def softmax_cross_entropy(x,t):
+    return SoftmaxCrossEntropy()(x,t)
 
 #Layer层
 class Layer:
@@ -812,143 +1027,80 @@ class MultiLayerNet(Model):
             if isinstance(layer,Layer):
                 yield from layer.params()
 
+#优化器类
+class Optimizer:
+    def __init__(self,model):
+        self.target = model
+        self.hooks = [] 
 
+    def add_hook(self,hook):
+        self.hooks.append(hook)
+
+    def updates(self):
+        params = self.target.params()
+        #过滤掉梯度为None的参数
+        params = [p for p in params if p.grad is not None]
+
+        #调用钩子函数，用于权重衰减、梯度裁剪等工作
+        for hook in self.hooks:
+            hook(params)
+    
+        #逐个更新参数
+        for param in params:
+            self.update_one(param)
+    
+    #每个参数的更新方法，需要在子类实现
+    def update_one(self,param):
+        raise NotImplementedError
+    
+#随机梯度下降类，继承自Optimizer类
+class SGD(Optimizer):
+    def __init__(self,model,lr = 0.01):
+        super().__init__(model)
+        self.lr = lr
+    
+    def update_one(self, param):
+        param.value -= self.lr * param.grad.value
+
+#Momentum类
+class Momentum(Optimizer):
+    def __init__(self,model,lr=0.1,momentum=0.9):
+        super().__init__(model)
+        self.lr = lr
+        self.momentum = momentum
+        self.v = {} #保存每个参数的动量项
+
+    def update_one(self,param):
+        if param.grad is None: #某些层可能不需要训练
+            return
+        grad = param.grad.value
+        #初始化动量
+        if param not in self.v:
+            self.v[param] = np.zeros_like(grad) #初始化参数对应动量
+        #提取动量
+        v = self.v[param] 
+        #计算动量更新
+        #v[:]是Numpy的切片赋值语法，表示原地赋值
+        #新速度 = 旧速度*学习率-学习率*梯度
+        v[:] = self.momentum*v - self.lr*grad
+        #参数更新，相比直接-=梯度，可以更好地保留速度、减少震荡
+        param.value += v
+
+#简单的softmax函数，假设参数x为二维数据
+def softmax_simple(x,axis=1):
+    x = as_variable(x)
+    y = exp(x)
+    sum_y = sum(y,axis=axis,keepdims=True)
+    return y/sum_y
+      
 if __name__ == '__main__':
-    # x = np.random.randn(100,1)
-    # y = np.sin(2*np.pi*x)+np.random.randn(100,1)
-    # l1 = LinearLayer(10) #输出维度是10
-    # l2 = LinearLayer(1) #输出维度是1
+    # a = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
+    # y = a[1]
+    # y.backward()
+    # print(y, a.grad)  # variable([4 5 6]) [[0 0 0] [1 1 1]]
 
-    # model = Layer()
-    # model.l1 = LinearLayer(10)
-    # model.l2 = LinearLayer(1)
-    # def predict(x):
-    #     h = model.l1(x)
-    #     y = sigmoid(h)
-    #     return model.l2(y)
-    
-    # lr = 0.2 #学习率
-    # iters = 100000 #迭代次数
+    # 随机4个手写数字识别的输出结果，形状 (4, 10)
+    # loss = softmax_cross_entropy_simple(np.random.rand(4, 10), np.array([2, 6, 9, 1]))
+    # print(loss)
+    pass
 
-    # for i in range(iters):
-    #     y_predict = predict(x)
-    #     loss = mean_squared_error(y,y_predict)
-    #     model.clear_grads()
-    #     loss.backward()
-    #     for p in model.params():
-    #         p.value -= lr*p.grad.value
-    #     if i%100 ==0:
-    #         print(f"iter {i},loss: {loss.value:.4f}")
-    # x = np.random.randn(100,1)
-    # y = np.sin(2*np.pi*x)+np.random.randn(100,1)
-
-    # lr = 0.2
-    # max_iter = 10000
-    # hidden_size = 10
-    # model = TwoLayerNet(hidden_size,1)
-    # for i in range(max_iter):
-    #     #前向传播
-    #     y_predict = model(x)
-    #     #计算损失
-    #     loss =  mean_squared_error(y_predict,y)
-    #     #重置权重并反向传播
-    #     model.clear_grads()
-    #     loss.backward()
-
-    #     for param in model.params():
-    #         param.value -= lr*param.grad.value
-        
-    #     if i % 100 == 0:
-    #         print(f"迭代{i}: 损失{loss.value:.4f}")
-    
-    # model.plot(x)
-
-        # 单层网络训练
-    def train_single_layer_net(x, y, lr, iters, output_size, loss_func):
-        model = LinearLayer(output_size)
-        lastLoss = Variable(np.array(0))
-        for epoch in range(iters):
-            y_predit = model(x)
-            loss = loss_func(y, y_predit)
-            loss.backward()  # 损失函数反向传播
-            # 更新参数
-            for param in model.params():
-                param.value -= lr * param.grad.value
-            model.clear_grads()
-            # # 打印损失值
-            # if epoch % 100 == 0:
-            #     print(f"{epoch}: loss={loss.value:.4f}")
-            lastLoss = loss.value
-
-        # 打印最后的损失值
-        print(f"单层模型的最终损失值是 {lastLoss:.4f}")
-        return model
-
-
-    # 双层网络训练, 多了一个 hidden_size 参数
-    def train_two_layer_net(x, y, lr, iters, hidden_size, output_size, loss_func):
-        model = TwoLayerNet(hidden_size, output_size)
-        lastLoss = Variable(np.array(0))
-        for epoch in range(iters):
-            y_predit = model(x)
-            loss = loss_func(y, y_predit)
-            loss.backward()  # 损失函数反向传播
-            # 更新参数
-            for param in model.params():
-                param.value -= lr * param.grad.value
-            model.clear_grads()
-            # # 打印损失值
-            # if epoch % 100 == 0:
-            #     print(f"{epoch}: loss={loss.value:.4f}")
-            lastLoss = loss.value
-        # 打印最后的损失值
-        print(f"双层模型的最终损失值是 {lastLoss:.4f}")
-        return model
-
-
-    # 多层网络[MLP]，多了一个 hidden_sizes 参数，是一个列表，每个元素是隐藏层的神经元数量
-    def train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, loss_func):
-        model = MultiLayerNet(hidden_sizes, output_size)
-        lastLoss = Variable(np.array(0))
-        for epoch in range(iters):
-            y_predit = model(x)
-            loss = loss_func(y, y_predit)
-            loss.backward()  # 损失函数反向传播
-            # 更新参数
-            for param in model.params():
-                param.value -= lr * param.grad.value
-            model.clear_grads()
-             # 打印损失值
-            if epoch % 100 == 0:
-                print(f"{epoch}: loss={loss.value:.4f}")
-            lastLoss = loss.value
-        # 打印最后的损失值
-        print(f"多层模型的最终损失值是 {lastLoss:.4f}")
-        return model
-
-
-    # 训练数据，从 -3 到 3 等间隔取 100 个点，然后 reshape 成 100 * 1 的向量
-    x = Variable(np.linspace(0, 3, 100).reshape(100, 1))  # (100, 1)
-    y = exp(x)  # 真实值
-
-    lr = 0.03  # 学习率
-    iters = 10000  # 迭代次数
-    hidden_size = 50  # 双层网络时，中间隐藏层的神经元数量
-    hidden_sizes = [hidden_size, hidden_size]  # 多层网络时，每个隐藏层的神经元数量，例如这里3层
-    output_size = 1
-
-    # 分别使用单层/双层/多层网络进行训练， 对比效果
-    #model_1_trained = train_single_layer_net(x, y, lr, iters, output_size, abs_loss)
-    #model_2_trained = train_two_layer_net(x, y, lr, iters, hidden_size, output_size, abs_loss)
-    model_3_trained = train_multi_layer_net(x, y, lr, iters, hidden_sizes, output_size, abs_loss)
-
-    # 预测
-    test_x = Variable(np.array([1.5]))
-   # y_predit_1 = model_1_trained(test_x)  # 模型1的预测值
-    #y_predit_2 = model_2_trained(test_x)  # 模型2的预测值
-    y_predit_3 = model_3_trained(test_x)  # 模型3的预测值
-    y = exp(test_x)  # 真实值
-   # print(f"单层模型预测的结果是 {y_predit_1.value} 真实值 {y.value}")
-   # print(f"双层模型预测的结果是 {y_predit_2.value} 真实值 {y.value}")
-    print(f"多层模型预测的结果是 {y_predit_3.value} 真实值 {y.value}")
-    model_3_trained.plot(x)
