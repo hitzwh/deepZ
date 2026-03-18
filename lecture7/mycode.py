@@ -1,6 +1,15 @@
 import numpy as np
 import weakref
 import graph_util as g
+from matplotlib import pyplot as plt
+import math
+import mnist
+
+mnist.temporary_dir = lambda: './'
+# 默认的数据源url好像失效了，使用下面的url
+mnist.datasets_url = 'https://ossci-datasets.s3.amazonaws.com/mnist/'
+
+
 #定义一个变量类
 class Variable:
     __array_priority__ = 999
@@ -750,16 +759,6 @@ class Clip(Function):
 def clip(x,x_min,x_max):
     return Clip(x_min,x_max)(x)
 
-#softmax和交叉熵一起算
-def softmax_cross_entropy_simple(x,t):
-    x,t = as_variable(x),as_variable(t)
-    N = x.shape[0] #一般x的i的第一个维度是批量数据个数batch size
-    p = softmax_simple(x)
-    p = clip(p,1e-5,1.0) #防止0和1溢出问题
-    log_p  = log(p)
-    tlog_p = log_p[np.arange(N),t.value] #Python高级索引
-    return -1 * sum(tlog_p)/N
-
 #最大类
 class Max(Function):
     def __init__(self,axis=None,keepdims=False):
@@ -881,7 +880,7 @@ def logsumexp(x,axis=1):
     m = x.max(axis=axis,keepdims=True)
     y = x - m 
     np.exp(y,out = y)
-    s = y.sum(axix=axis,keepdims=True)
+    s = y.sum(axis=axis,keepdims=True)
     np.log(s,out=s)
     m += s
     return m #最终返回log ∑ exp(xi)
@@ -894,7 +893,7 @@ class SoftmaxCrossEntropy(Function):
         N = x.shape[0]
         log_z = logsumexp(x,axis=1)
         log_p = x - log_z #计算每个类别的对数概率
-        log_p = log_p[np.arange[N],t.ravel()] #共N个元素，0,t[0];1,t[1]....
+        log_p = log_p[np.arange(N),t.ravel()] #共N个元素，0,t[0];1,t[1]....
         y = -log_p.sum() / np.float32(N) #平均交叉熵损失
         return y
     
@@ -908,7 +907,7 @@ class SoftmaxCrossEntropy(Function):
 
         #构造one-hot
         one_hot = np.zeros_like(y,dtype=np.float32)
-        one_hot[np.arrange[N],t.value] = 1
+        one_hot[np.arange(N),t.value] = 1
         #softmax + crossentropy的合成梯度
         y = (y-one_hot) *dy #p-one_hot即是预测与真实之间的差异
         #正确类别的梯度是负数，错误类别的梯度是正数
@@ -950,10 +949,40 @@ class Layer:
             else:
                 yield obj
 
-    #清楚所有参数的梯度
+    #清除所有参数的梯度
     def clear_grads(self):
         for param in self.params():
             param.clear_grad()
+
+    def _flatten_params(self,params_dict,parent_key=""):
+        for name in self.params_name:
+            obj = self.__dict__[name]
+        
+            #key的设计是支持嵌套的
+            key = parent_key + '/' + name if parent_key else name
+            #如果是Layer类型，递归调用_flatten_params方法，最终都将参数加入到params_dict中
+            if isinstance(obj,Layer):
+                obj._flatten_params(params_dict,key)
+            else:
+                params_dict[key] = obj
+
+    #保存参数
+    def save_params(self,file_path="params.npz"):
+        params_dict = {}
+        self._flatten_params(params_dict)
+        #params_dict中的对象是Paramer类型，要转换为numpy数组类型
+        for key,param in params_dict.items():
+            params_dict[key] = param.value
+        #将多个数组保存到一个压缩的.npz文件中
+        np.savez_compressed(file_path,**params_dict) #**是字典解包语法，将字典中的每个键值对作为独立的关键字参数传递给函数
+    
+    #加载参数
+    def load_params(self,file_path="params.npz"):
+        data = np.load(file_path,allow_pickle=True)
+        params_dict = {}
+        self._flatten_params(params_dict)
+        for key,param in params_dict.items():
+            param.value = data[key]
 
 #线性层
 class LinearLayer(Layer):
@@ -1008,7 +1037,8 @@ class MultiLayerNet(Model):
         self.layers = []
         for i in range(len(hidden_size)):
             self.layers.append(LinearLayer(hidden_size[i],dtype=dtype))
-            self.layers.append(sigmoid)
+            #self.layers.append(sigmoid)
+            self.layers.append(relu)
         #最后一层的输出形状是 output_size
         self.layers.append(LinearLayer(output_size,dtype=dtype))
     
@@ -1086,21 +1116,367 @@ class Momentum(Optimizer):
         #参数更新，相比直接-=梯度，可以更好地保留速度、减少震荡
         param.value += v
 
-#简单的softmax函数，假设参数x为二维数据
-def softmax_simple(x,axis=1):
-    x = as_variable(x)
-    y = exp(x)
-    sum_y = sum(y,axis=axis,keepdims=True)
-    return y/sum_y
-      
+#数据集类
+class DataSet:
+    def __init__(self,is_train=True,y_transform=None,t_transform=None):
+        self.is_train = is_train
+        self.y_transform = y_transform #样本预处理函数，可为None
+        self.t_transform = t_transform #样本预处理函数，可为None
+
+        self.data = None
+        self.label = None #标签值，无监督学习不需要标签
+        self.prepare()
+
+    #获取数据集的样本的方式
+    def __getitem__(self,index):
+        assert np.isscalar(index) #index必须是标量，暂不支持复杂切片
+        y = self.data[index]
+        t = None if self.label is None else self.label[index]
+        #延迟transform判断
+        if self.y_transform:
+            y = self.y_transform(y)
+        if self.t_transform and t is not None:
+            t = self.t_transform(t)
+        return y,t
+    
+    #获取数据集长度
+    def __len__(self):
+        return len(self.data)
+    
+    #准备数据集
+    def prepare(self):
+        pass
+
+#三分类数据集类，继承自DataSet类
+class ThreeClassDataset(DataSet):
+    def prepare(self):
+        self.data,self.label = get_example_data()
+
+#取简单数据
+def get_example_data():
+    #num_data表示每个类别的样本数，num_class表示样本数
+    num_data,num_class,input_dim = 1000,3,2
+    data_size = num_class * num_data
+    x = np.zeros((data_size,input_dim),dtype=np.float32)
+    t = np.zeros(data_size,dtype = np.int32) #标签，每个类别对应一个整数
+
+    for j in range(num_class):
+        for i  in range(num_data):
+            rate = i/num_data
+            radius = 1.0 * rate
+            theta = j*4.0+4.0*rate+np.random.randn()*0.2
+            ix = num_data * j + i
+            x[ix] = np.array([radius*np.sin(theta),radius*np.cos(theta)]).flatten()
+            t[ix] = j
+    
+    #Shuffle,随机打乱数据
+    #permutation生成一个随机排列的数组
+    indices =  np.random.permutation(num_data*num_class)
+    #高级索引，按indices重排数组的行
+    x = x[indices] #用于输入数据集，每个类别对应一个整数
+    t = t[indices] #标签数据集，每个类别对应一个整数
+    # 附，可用于绘图
+    plt.figure(figsize=(6, 6))
+    # 不同类别使用不同颜色
+    for i in range(3):
+        plt.scatter(x[t == i, 0], x[t == i, 1], label=f"Class {i}", s=20)
+    plt.legend()
+    plt.xlabel("x1")
+    plt.ylabel("x2")
+    #plt.show()
+    return x,t
+
+#MNIST数据集类，继承自DataSet类
+class MNISTDataset(DataSet):
+    def prepare(self):
+        if self.is_train:
+            images = mnist.train_images()
+            labels = mnist.train_labels()
+        else:
+            images = mnist.test_images()
+            labels = mnist.test_labels()
+        
+        #数据预处理
+        #转为float32并归一化到[0,1]
+        images = images.astype(np.float32) / 255.0
+
+        #拉平成（N，784）方便输入MLP
+        images = images.reshape(len(images),-1)
+
+        self.data = images
+        self.label = labels
+
+#计算准确率
+def accuracy(y:np.ndarray,t:np.ndarray):
+    y,t=as_variable(y),as_variable(t)
+    #预测值中概率最大的类别，构成鱼标签相同的形状
+    pred = y.value.argmax(axis=1).reshape(t.shape)
+    result = pred==t.value #预测鱼标签相等的位置为True，否则为False
+    acc = result.mean() #计算准确率
+    return Variable(as_array(acc))
+
+#迭代器类
+class MyIterator:
+    def __init__(self,max_cnt):
+        self.max_cnt = max_cnt
+        self.cnt = 0
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.cnt == self.max_cnt:
+            raise StopIteration()
+        self.cnt += 1
+        return self.cnt
+
+#数据加载器
+class DataLoader:
+    def __init__(self,dataset,batch_size,shuffle=True):
+        self.dataset = dataset #原始数据集
+        self.iteration = 0 #当前迭代次数
+        self.index = None #当前批次的样本索引
+        self.batch_size = batch_size #每个批次的样本数量
+        self.shuffle = shuffle #是否在每个epoch开始时打乱数据索引
+        self.data_size = len(dataset)
+        #每个epoch中，迭代的最大次数
+        self.max_iter = math.ceil(self.data_size/batch_size)
+        self.reset()
+    
+    #重置迭代器，将迭代次数设为0，根据shuffle参数是否为True，重新设置样本索引
+    def reset(self):
+        self.iteration=0
+        if self.shuffle:
+            self.index = np.random.permutation(len(self.dataset))
+        else:
+            self.index = np.arange(len(self.dataset))
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.iteration >= self.max_iter:
+            self.reset()
+            raise StopIteration
+        
+        i,batch_size = self.iteration,self.batch_size
+        batch_index = self.index[i*batch_size:(i+1)*batch_size]
+        batch = [self.dataset[i] for i in batch_index]
+
+        x = np.array([example[0] for example in batch])
+        t = np.array([example[1] for example in batch])
+
+        self.iteration += 1
+        return x,t
+    
+    def next(self):
+        return self.__next__()
+    
 if __name__ == '__main__':
-    # a = Variable(np.array([[1, 2, 3], [4, 5, 6]]))
-    # y = a[1]
-    # y.backward()
-    # print(y, a.grad)  # variable([4 5 6]) [[0 0 0] [1 1 1]]
 
-    # 随机4个手写数字识别的输出结果，形状 (4, 10)
-    # loss = softmax_cross_entropy_simple(np.random.rand(4, 10), np.array([2, 6, 9, 1]))
-    # print(loss)
-    pass
+    # def transform_div2(x):
+    #     return x / 2.0
 
+    # max_epoch = 300 #最大训练轮数
+    # batch_size = 30 #每个批次的样本数量
+    # hidden_size = 10 #隐藏层神经元数量
+    # lr = 1.0 #学习率
+
+    # #train_set = ThreeClassDataset()
+    # train_set = ThreeClassDataset(is_train=True)
+    # test_set = ThreeClassDataset(is_train=False)
+
+    # train_loader = DataLoader(train_set,batch_size)
+    # test_loader = DataLoader(test_set,batch_size,shuffle=False)
+
+    # #定义模型，输入层到隐藏层有hidden_size个神经元，隐藏层到输出层有3个神经元
+    # model = MultiLayerNet((hidden_size,),3)
+    # optimizer = SGD(model,lr) #SGD优化器
+
+    # #for数据可视化
+    # train_loss_list,test_loss_list = [],[]
+    # train_acc_list,test_acc_list = [],[]
+
+    # #训练max_epoch轮，每轮max_iter批样本
+    # for epoch in range(max_epoch):
+    #     sum_loss,sum_acc= 0,0
+    #     #每轮迭代取一个批次的样本
+    #     for x,t in train_loader:
+    #         y = model(x)
+    #         loss = softmax_cross_entropy(y,t)
+    #         model.clear_grads()
+    #         loss.backward()
+    #         optimizer.updates()
+    #         acc = accuracy(y,t)
+    #         sum_loss += float(loss.value) * len(t)
+    #         sum_acc += float(acc.value) * len(t)
+        
+    #     print("epoch: {}".format(epoch + 1))
+    #     print("train loss: {:.4f}, accuracy: {:.4f}".format(sum_loss / len(train_set), sum_acc / len(train_set)))
+
+    #     sum_loss_test,sum_acc_test = 0,0
+    #     for x,t in test_loader:
+    #         y= model(x)
+    #         loss = softmax_cross_entropy(y,t)
+    #         acc = accuracy(y,t)
+    #         sum_loss_test += float(loss.value) * len(t)
+    #         sum_acc_test += float(acc.value) * len(t)
+    #     print("test loss: {:.4f}, accuracy: {:.4f}".format(sum_loss_test / len(test_set), sum_acc_test / len(test_set)))
+
+    #     # ======= 保存数据用于可视化 =======
+    #     train_loss_list.append(sum_loss / len(train_set))
+    #     test_loss_list.append(sum_loss_test / len(test_set))
+    #     train_acc_list.append(sum_acc / len(train_set))
+    #     test_acc_list.append(sum_acc_test / len(test_set))
+    
+    # # ======= 绘图 =======
+    # epochs = range(1, max_epoch + 1)
+    # plt.figure(figsize=(12, 5)) #指定图形的宽度为12英寸，高度为5英寸
+
+    # # --- loss 曲线 ---
+    # plt.subplot(1, 2, 1) #将图形划分为1行2列的子图，并选中第一个子图画loss曲线
+    # plt.plot(epochs, train_loss_list, label="Train Loss") #横轴轮次，纵轴是损失
+    # plt.plot(epochs, test_loss_list, label="Test Loss")
+    # #添加轴信息的标题
+    # plt.xlabel("Epoch")
+    # plt.ylabel("Loss")
+    # plt.title("Training vs Test Loss")
+    # #添加图例
+    # plt.legend()
+    # #显示网格线，便于观察
+    # plt.grid(True)
+
+    # # --- acc 曲线 ---
+    # plt.subplot(1, 2, 2) #选中第二个子图画acc曲线
+    # plt.plot(epochs, train_acc_list, label="Train Accuracy")
+    # plt.plot(epochs, test_acc_list, label="Test Accuracy")
+    # plt.xlabel("Epoch")
+    # plt.ylabel("Accuracy")
+    # plt.title("Training vs Test Accuracy")
+    # plt.legend()
+    # plt.grid(True)
+
+    # #调整子图间距
+    # plt.tight_layout()
+    # #展示图形
+    # plt.show()
+    # y = np.array([[0.2, 0.8, 0], [0.1, 0.9, 0], [0.8, 0.1, 0.1]])
+    # t = np.array([1, 2, 0])
+    # acc = accuracy(y, t)
+    # print(acc) # variable(0.6666666666666666)
+    # obj = MyIterator(3)
+    # for x in obj:
+    #     print(x)
+
+    max_epoch = 3 #最大训练轮数
+    batch_size = 30 #每个批次的样本数量
+    hidden_size = 256 #隐藏层神经元数量
+    lr = 0.05 #学习率
+
+    #train_set = ThreeClassDataset()
+    train_set = MNISTDataset(is_train=True)
+    test_set = MNISTDataset(is_train=False)
+
+    train_loader = DataLoader(train_set,batch_size)
+    test_loader = DataLoader(test_set,batch_size,shuffle=False)
+
+    #定义模型，输入层到隐藏层有hidden_size个神经元，隐藏层到输出层有10个神经元
+    model = MultiLayerNet((hidden_size,),10)
+    optimizer = SGD(model,lr) #SGD优化器
+
+    #for数据可视化
+    train_loss_list,test_loss_list = [],[]
+    train_acc_list,test_acc_list = [],[]
+
+    #训练max_epoch轮，每轮max_iter批样本
+    for epoch in range(max_epoch):
+        sum_loss,sum_acc= 0,0
+        #每轮迭代取一个批次的样本
+        for x,t in train_loader:
+            y = model(x)
+            loss = softmax_cross_entropy(y,t)
+            model.clear_grads()
+            loss.backward()
+            optimizer.updates()
+            acc = accuracy(y,t)
+            sum_loss += float(loss.value) * len(t)
+            sum_acc += float(acc.value) * len(t)
+        
+        print("epoch: {}".format(epoch + 1))
+        print("train loss: {:.4f}, accuracy: {:.4f}".format(sum_loss / len(train_set), sum_acc / len(train_set)))
+
+        sum_loss_test,sum_acc_test = 0,0
+        for x,t in test_loader:
+            y= model(x)
+            loss = softmax_cross_entropy(y,t)
+            acc = accuracy(y,t)
+            sum_loss_test += float(loss.value) * len(t)
+            sum_acc_test += float(acc.value) * len(t)
+        print("test loss: {:.4f}, accuracy: {:.4f}".format(sum_loss_test / len(test_set), sum_acc_test / len(test_set)))
+
+        # ======= 保存数据用于可视化 ======
+        train_loss_list.append(sum_loss / len(train_set))
+        test_loss_list.append(sum_loss_test / len(test_set))
+        train_acc_list.append(sum_acc / len(train_set))
+        test_acc_list.append(sum_acc_test / len(test_set))
+    
+    model.save_params("params.npz")
+    # ======= 绘图 =======
+    epochs = range(1, max_epoch + 1)
+    plt.figure(figsize=(12, 5)) #指定图形的宽度为12英寸，高度为5英寸
+
+    # --- loss 曲线 ---
+    plt.subplot(1, 2, 1) #将图形划分为1行2列的子图，并选中第一个子图画loss曲线
+    plt.plot(epochs, train_loss_list, label="Train Loss") #横轴轮次，纵轴是损失
+    plt.plot(epochs, test_loss_list, label="Test Loss")
+    #添加轴信息的标题
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training vs Test Loss")
+    #添加图例
+    plt.legend()
+    #显示网格线，便于观察
+    plt.grid(True)
+
+    # --- acc 曲线 ---
+    plt.subplot(1, 2, 2) #选中第二个子图画acc曲线
+    plt.plot(epochs, train_acc_list, label="Train Accuracy")
+    plt.plot(epochs, test_acc_list, label="Test Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Training vs Test Accuracy")
+    plt.legend()
+    plt.grid(True)
+
+    #调整子图间距
+    plt.tight_layout()
+    #展示图形
+    plt.show()
+
+
+
+
+    # # 假设有两层神经网络参数
+    # W1 = np.random.randn(100, 50).astype(np.float32)  # 输入层到隐藏层
+    # b1 = np.random.randn(50).astype(np.float32)
+    # W2 = np.random.randn(50, 10).astype(np.float32)  # 隐藏层到输出层
+    # b2 = np.random.randn(10).astype(np.float32)
+
+    # # ---------- 保存 ----------
+    # np.savez_compressed("weights.npz", W1=W1, b1=b1, W2=W2, b2=b2)
+    # print("✅ 权重参数已压缩保存到 weights.npz")
+
+    # # ---------- 加载 ----------
+    # data = np.load("weights.npz")
+
+    # print("W1 形状:", data["W1"].shape)  # (100, 50)
+    # print("b2 示例:", data["b2"][:5])  # [ 0.33 -1.12  0.95  0.24 -0.77]
+
+    # #定义网络
+    # t = TwoLayerNet(3, 2)
+    # t.forward(np.random.randn(100, 3))  # 前向传播一次，确保参数被初始化
+    # params_dict = {}
+    # t._flatten_params(params_dict)
+    # #因为收集参数名时使用的是集合set无序，所以打印出的参数顺序也不确定
+    # #但不影响模型
+    # print(params_dict)
