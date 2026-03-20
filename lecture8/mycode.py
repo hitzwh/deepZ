@@ -3,6 +3,7 @@ import weakref
 import graph_util as g
 from matplotlib import pyplot as plt
 import math
+import time
 #import mnist
 
 # mnist.temporary_dir = lambda: './'
@@ -1100,8 +1101,19 @@ class LSTM(Layer):
 
         self.h, self.c = h_new, c_new
         return h_new
-    
 
+#词嵌入层
+class Embedding(Layer):
+    #in_size一般是vocab_size,embedding_size需要手动指定，一般是64
+    def __init__(self,in_size,embedding_size):
+        super().__init__()
+        #参数，初始化为正态
+        self.W_embed = Parameter(np.random.randn(in_size,embedding_size),name = "W_embed")
+    
+    def __call__(self,x):
+        y = self.W_embed[x]
+        return y
+    
 #模型类
 class Model(Layer):
     def plot(self,*inputs,to_file="model.png"):
@@ -1178,6 +1190,24 @@ class SimpleLSTM(Model):
         y = self.fc(h)
         return y
 
+# 带有词嵌入的 LSTM
+class LSTMWithEmbedding(Model):
+    # out_size 一般是 vocab_size
+    def __init__(self, hidden_size, out_size, embedding_size):
+        super().__init__()
+        self.embedding = Embedding(out_size, embedding_size)
+        self.rnn = LSTM(hidden_size)
+        self.fc = LinearLayer(out_size)
+
+    def reset_state(self):
+        self.rnn.reset_state()
+
+    def forward(self, input_x):
+        temp1 = self.embedding(input_x)
+        y = self.rnn(temp1)
+        y = self.fc(y)
+        return y
+    
 #优化器类
 class Optimizer:
     def __init__(self,model):
@@ -1361,6 +1391,7 @@ class MNISTDataset(DataSet):
         self.data = images
         self.label = labels
 
+#正弦函数数据集，继承自DataSet类
 class SinCurve(DataSet):
     def prepare(self):
         num_data = 1000
@@ -1378,6 +1409,30 @@ class SinCurve(DataSet):
         y = y.astype(dtype)
         self.data = y[:-1][:, np.newaxis] # x 值是 sin 值的前一个时间步
         self.label = y[1:][:, np.newaxis] # t 值是 sin 值的下一个时间步
+
+#莎士比亚全集
+class TinyShakespeareDataset(DataSet):
+
+    def prepare(self):
+        #路径可改
+        file_path = "tiny_shakespeare.txt"
+        with open(file_path,'r') as f:
+            data = f.read()
+        chars = list(data)
+
+        char_to_id = {}
+        id_to_char = {}
+        for word in data:
+            if word not in char_to_id:
+                new_id = len(char_to_id)
+                char_to_id[word] = new_id
+                id_to_char[new_id] = word
+        
+        indices = np.array([char_to_id[c] for c in chars])
+        self.data = indices[:-1]
+        self.label = indices[1:]
+        self.char_to_id = char_to_id
+        self.id_to_char = id_to_char
 
 #计算准确率
 def accuracy(y:np.ndarray,t:np.ndarray):
@@ -1446,14 +1501,14 @@ class DataLoader:
         return self.__next__()
 
 #时序数据加载器
-class SeqDateLoader(DataLoader):
+class SeqDataLoader(DataLoader):
     def __init__(self,dataset,batch_size):
         #有时序，不可打乱顺序
         super().__init__(dataset=dataset,batch_size=batch_size,shuffle=False)
 
     def __next__(self):
         if self.iteration >= self.max_iter:
-            self.reset
+            self.reset()
             raise StopIteration
         
         jump = self.data_size // self.batch_size
@@ -1499,68 +1554,137 @@ if __name__ == '__main__':
     #         loss.backward()
     #         print(f"loss: {loss.value/cnt}")
 
-# Hyperparameters 超参数，需要人工手动设置
-    max_epoch = 10  # 训练轮数。每一轮是一次完整的数据集遍历
-    hidden_size = 100
-    bptt_length = 30  # 截断反向传播的时间步长。每 bptt_length 个时间步进行一次反向传播更新
+    #超参数设置
+    max_epoch = 50   #训练轮数，每一轮都是一次完整的数据集遍历
+    batch_size = 10          # 并行处理的序列数
+    bptt_length = 16              # 每个训练块的时间步数（截断BPTT长度），减少递归深度
+    hidden_size = 256
+    embedding_size = 32
 
-    train_set = SinCurve(is_train=True)
-    seqlen = len(train_set)  # 每次从数据集中取样本的序列长度，这里直接取整个数据集的长度
+
+    # 加载莎士比亚数据集
+    train_set = TinyShakespeareDataset(is_train=True)
+    test_set = TinyShakespeareDataset(is_train=False)
+    train_loader = SeqDataLoader(train_set, batch_size)
+    test_loader = SeqDataLoader(test_set, batch_size)
+
+    output_size = len(train_set.char_to_id)  # 一般是 vocab_size
+    seqlen = len(train_set)
 
     # 预测数据值，回归任务，所以 output_size 是 1
-    model = SimpleLSTM(hidden_size, 1)
-    optimizer = Adam(model)  # 使用 Adam 效果更好
+    model = LSTMWithEmbedding(hidden_size, output_size, embedding_size)
+    optimizer = Adam(model)  # 使用 Adam 效果更好)
 
-
-    # Start training.
     for epoch in range(max_epoch):
-        # 每轮训练需要重置 RNN 层的隐藏状态
-        model.reset_state() # 重置模型，消除训练时的h状态
-        loss, count = np.float32(0), 0
+        # ---- 训练阶段 ----
+        s1 = int(round(time.time()))
+        model.reset_state()  # 先重置一下隐含状态
+        total_loss = Variable(np.array(0.0, dtype=np.float32))
+        total_acc = 0
+        count = 0
 
-        for x, t in train_set:
-            # x 的形状是 (1, )，需要 reshape 成 (1, 1). 因为 RNN 的入参需要是 2 维的，否则无法做 linear 中的矩阵乘法
-            x = x.reshape(1, 1)
+        for x, t in train_loader:
+            # x和t 的维度本应该是 (batch_size, time_size, input_dim)
+            # 但这里字符级编码，所以 input_dim 为 1 省略， 所以这里 x为 (batch_size, time_size)
             y = model(x)
-            loss += mean_squared_error(y, t)  # 数值类型的回归任务，使用均方误差损失函数即可。
+            # 输出 y 的维度应该是 (batch_size, time_size, 种类数 vocab_size )
+            total_loss += softmax_cross_entropy(y, t)
+            acc = accuracy(y, t)  # 新增：计算当前批次的准确率
+            total_acc += float(acc.value) * len(t)  # 新增：累加准确率
+
             count += 1
 
-            # 当遍历一个 bptt_length 长度的序列时，需要切断 RNN 层的状态
-            #因为RNN处理长序列时，容易导致计算量过大和梯度消失/爆炸
             if count % bptt_length == 0 or count == seqlen:
                 model.clear_grads()
-                loss.backward()
-                #切断与之前计算图的联系
-                loss.unchain_backward()
-                #更新参数
+                total_loss.backward()
+                total_loss.unchain_backward()
                 optimizer.updates()
+        if count > 0:
+            avg_loss = float(total_loss.value) / count
+            avg_acc = total_acc / (count * batch_size)  # 新增：计算平均准确率
+        else:
+            avg_loss = 0.0
+            avg_acc = 0.0
+        time_end = time.time()
+        print('| epoch %d | loss %f | acc %f | time %f' % (epoch + 1, avg_loss, avg_acc, time_end - s1))
+    model.save_params()
 
-        avg_loss = float(loss.value) / count
-        print('| epoch %d | loss %f' % (epoch + 1, avg_loss))
+    def generate_text(model, start_text='I want to', length=200, temperature=1.0, top_k=None):
+        """
+        使用训练好的模型生成文本。
+        - model: 训练好的 LSTMWithEmbedding 模型
+        - start_text: 初始提示文本（可为空）
+        - length: 要生成的字符数
+        - temperature: 温度系数，>1 更随机，<1 更确定
+        - top_k: 若设置为正整数，则仅在 top-k 概率最大的字符中采样
+        """
+        # 重置 RNN/LSTM 隐状态
+        model.reset_state()
 
-        # 加载测试集
-    test_set = SinCurve(is_train=False)   # 测试集是 cos(x)，无噪声
-    seqlen = len(test_set)
+        # 用 seed_text 预热隐状态（除了最后一个字符）
+        if start_text:
+            for ch in start_text[:-1]:
+                if ch in train_set.char_to_id:
+                    x = np.array([train_set.char_to_id[ch]], dtype=np.int32)
+                    _ = model(x)
 
-    # 重置模型隐藏状态（测试新序列前必须重置）
-    model.reset_state()
+        # 起始字符：取 seed_text 最后一个
+        current_id = train_set.char_to_id[start_text[-1]]
+        generated = [start_text]
 
-    # 用于存储预测值和真实值
-    predictions = []
-    targets = []
+        for _ in range(length):
+            x = np.array([current_id], dtype=np.int32)
+            # 前向传播，获取下一个字符的 logits
+            logits = model(x)  # Variable, shape: (1, vocab_size)
 
-    for x, t in test_set:
-        x = x.reshape(1, 1)           # 变为 (1, 1)
-        y = model(x)                   # 前向传播，得到预测值（Variable 类型）
-        predictions.append(y.value.item())  # 提取数值并转换为 Python 标量
-        targets.append(t.item())        # 真实标签（假设 t 是标量或形状 (1,)）
+            # 温度缩放[可选]
+            if temperature != 1.0:
+                logits = logits / np.float32(temperature)
+
+            probs = softmax(logits).value[0]  # ndarray, shape: (vocab_size,)
+
+            # top-k 采样[可选]
+            if top_k is not None and 0 < top_k < len(probs):
+                idxs = np.argpartition(probs, -top_k)[-top_k:]
+                p = probs[idxs]
+                p = p / p.sum()
+                next_id = np.random.choice(idxs, p=p)
+            else:
+                next_id = np.random.choice(np.arange(len(probs)), p=probs)
+
+            generated.append(train_set.id_to_char[next_id])
+            # 关键。更新当前字符为下一个字符，准备下一次迭代
+            current_id = next_id
+
+        return ''.join(generated)
     
-    plt.figure(figsize=(10, 5))
-    plt.plot(targets, label='True', color='blue')
-    plt.plot(predictions, label='Predicted', color='red', linestyle='--')
-    plt.xlabel('Time step')
-    plt.ylabel('Value')
-    plt.title('LSTM Prediction on Test Set (cos)')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+    # 使用训练好的模型生成文本
+    print("="*80)
+    print("默认参数 (temperature=1.0, top_k=None):")
+    text = generate_text(model, start_text="Alas, that love, whose view is muffled still ", length=100)
+    print(text)
+    
+    print("="*80)
+    print("较低温度 (temperature=0.7, top_k=None):")
+    text2 = generate_text(model, start_text="Alas, that love, whose view is muffled still ", length=100, temperature=0.7)
+    print(text2)
+    
+    print("="*80)
+    print("温度0.7 + top_k=20:")
+    text3 = generate_text(model, start_text="Alas, that love, whose view is muffled still ", length=100, temperature=0.7, top_k=20)
+    print(text3)
+    
+    print("="*80)
+    print("温度0.8 + top_k=40 (较保守):")
+    text4 = generate_text(model, start_text="Alas, that love, whose view is muffled still ", length=100, temperature=0.8, top_k=40)
+    print(text4)
+    
+    print("="*80)
+    print("不同起始文本:")
+    text5 = generate_text(model, start_text="First Citizen:", length=100, temperature=0.7, top_k=20)
+    print(text5)
+    
+    print("="*80)
+    print("温度0.5 + top_k=10 (最确定):")
+    text6 = generate_text(model, start_text="To be or not to be, that is the ", length=100, temperature=0.5, top_k=10)
+    print(text6)
